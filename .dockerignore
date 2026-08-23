@@ -1,0 +1,28 @@
+# ---------------------------------------------------------------------------
+# Build context exclusions.
+#
+# This file must live at the CONTEXT ROOT. Docker does not honour per-directory
+# .dockerignore files, so apps/*/.dockerignore would be silently inert — which
+# is how the host's Windows node_modules ended up overwriting the image's and
+# breaking every build.
+# ---------------------------------------------------------------------------
+**/node_modules
+**/dist
+**/.next
+**/coverage
+**/*.tsbuildinfo
+
+.git
+.github
+.brief
+
+**/.env
+**/.env.*
+!**/.env.example
+
+*.md
+!README.md
+
+.vscode
+.idea
+.DS_Store

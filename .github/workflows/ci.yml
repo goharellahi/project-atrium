@@ -1,0 +1,68 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: ['**']
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: typecheck, lint, test
+    runs-on: ubuntu-latest
+
+    # The suite talks to a real Postgres rather than a mock. The things worth
+    # testing here — the exclusion constraint, the generated slot column, the
+    # append-only trigger — exist only in Postgres, so an in-memory substitute
+    # would test nothing that matters.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: atrium
+          POSTGRES_PASSWORD: atrium
+          POSTGRES_DB: atrium
+          TZ: UTC
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U atrium -d atrium"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://atrium:atrium@localhost:5432/atrium
+      JWT_SECRET: ci-only-secret-not-used-anywhere
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Apply migrations
+        run: pnpm --filter @atrium/api db:migrate
+
+      - name: Typecheck
+        run: pnpm -r typecheck
+
+      - name: Lint
+        run: pnpm -r --if-present lint
+
+      - name: Test
+        run: pnpm -r test

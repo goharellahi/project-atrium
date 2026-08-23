@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Cross-venue tenant isolation negative tests (INV-6).",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

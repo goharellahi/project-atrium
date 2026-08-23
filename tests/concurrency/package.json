@@ -5,7 +5,7 @@
   "type": "module",
   "description": "The mandatory 200-request concurrency proof (brief §05).",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
