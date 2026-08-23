@@ -17,7 +17,8 @@ import {
   type BookingStatus,
 } from '../db/schema';
 import { log } from '../common/logger';
-import { isExclusionViolation } from '../common/pg-errors';
+import { isExclusionViolation, isTransientRollback } from '../common/pg-errors';
+import { withTransientRetry } from '../common/retry-transaction';
 import type { Env } from '../config/env';
 import type { AuthPrincipal } from '../common/context/request-context';
 import { isWithinOperatingHours, parseOperatingHours } from '../common/time/operating-hours';
@@ -41,6 +42,15 @@ import {
 } from './bookings.schemas';
 
 const ACTIVE: readonly BookingStatus[] = ['HELD', 'PENDING_PAYMENT', 'CONFIRMED'];
+
+/**
+ * Advisory lock namespace for per-room hold serialisation.
+ *
+ * Arbitrary but fixed. The two-argument advisory lock space is separate from
+ * the single-argument one used by the hold sweeper and the webhook drainer, so
+ * this cannot collide with either.
+ */
+const ROOM_LOCK_NAMESPACE = 4771;
 
 export interface HoldResult {
   booking: Booking;
@@ -86,7 +96,91 @@ export class BookingsService {
     const durationHours =
       (input.ends_at.getTime() - input.starts_at.getTime()) / 3_600_000;
 
+    /**
+     * The transaction is retried on a class-40 rollback, and only on that.
+     *
+     * Under 200 concurrent holds for one slot, Postgres reports the losers two
+     * different ways: `23P01` — the exclusion constraint, a real answer meaning
+     * "taken" — and occasionally `40P01`, a deadlock while checking that same
+     * constraint, which means only that it could not order two transactions and
+     * threw one away. The second is transient and says nothing about the slot.
+     * A class-40 abort rolls the transaction back completely, so re-running it
+     * is safe: no rows, no locks, no half-written audit trail.
+     *
+     * Exhausting the retries becomes a 409, not a 500. A slot that still
+     * deadlocks after four attempts is contended, and "contended" is exactly
+     * what a 409 says.
+     */
+    try {
+      return await withTransientRetry(
+        'bookings.hold',
+        () => this.holdOnce(input, context, requestedQuantities, durationHours, principal),
+        this.env.TRANSIENT_RETRY_ATTEMPTS,
+      );
+    } catch (err: unknown) {
+      if (isTransientRollback(err)) {
+        log().warn(
+          { roomId: input.room_id, startsAt: input.starts_at.toISOString() },
+          'hold rejected: sustained contention, gave up retrying',
+        );
+        throw new ConflictException({
+          statusCode: 409,
+          error: 'Conflict',
+          message:
+            'That slot is under heavy contention right now and the request could not be ordered against the others. Retry.',
+          room_id: input.room_id,
+          starts_at: input.starts_at.toISOString(),
+          ends_at: input.ends_at.toISOString(),
+          reason: 'serialization_conflict',
+        });
+      }
+      throw err;
+    }
+  }
+
+  /** One attempt at the hold transaction. Retried by `hold` on a class-40 abort. */
+  private async holdOnce(
+    input: HoldInput,
+    context: RoomContext,
+    requestedQuantities: Map<string, number>,
+    durationHours: number,
+    principal: AuthPrincipal,
+  ): Promise<HoldResult> {
     return this.db.transaction(async (tx) => {
+      // (a0) Queue behind anyone else holding THIS room, before touching the
+      //      exclusion index.
+      //
+      // This is NOT the correctness mechanism and must never be mistaken for
+      // one — `no_room_overlap` still decides every admission, and removing
+      // this line would change throughput, not outcomes. It is a queueing
+      // discipline, and it exists because of something the P2 proof only
+      // revealed when it was run repeatedly in P5.
+      //
+      // 200 concurrent inserts of the same range into a gist exclusion index do
+      // not queue politely. Each inserter finds a conflicting in-progress tuple
+      // and waits on that transaction's xid, and with enough of them the waits
+      // form cycles: T1 waits on T2 while T2 waits on T1. Postgres resolves a
+      // cycle by aborting one side — but only after `deadlock_timeout`, which
+      // defaults to a full second. Measured over five consecutive proof runs
+      // that produced 227 deadlocks, and 227 seconds of lock waiting spread
+      // across a 20-connection pool is what turned a correct system into one
+      // answering 500s and nginx 504s.
+      //
+      // A transaction-scoped advisory lock keyed on the room replaces that
+      // free-for-all with a total order. Everyone takes the same lock first, so
+      // no cycle can form; the winner commits and releases it, and every
+      // subsequent contender then hits a COMMITTED conflicting row and gets its
+      // 23P01 immediately instead of waiting a second to be told. Different
+      // rooms hash to different keys and never queue behind each other.
+      //
+      // The two-argument form occupies a different advisory lock space from the
+      // single-argument locks the hold sweeper and webhook drainer use, so the
+      // namespaces cannot collide. A hashtext collision between two rooms would
+      // cost throughput on those two rooms and nothing else.
+      await tx.execute(
+        sql`SELECT pg_advisory_xact_lock(${ROOM_LOCK_NAMESPACE}, hashtext(${input.room_id}))`,
+      );
+
       // (a) Expire stale holds for THIS room, in this transaction.
       //
       // `no_room_overlap` has a status predicate but no time predicate: an

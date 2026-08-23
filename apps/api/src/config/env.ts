@@ -46,6 +46,21 @@ const EnvSchema = z.object({
    */
   HOLD_SWEEPER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(30),
 
+  /**
+   * How many times a transaction aborted by Postgres with a class-40 error
+   * (deadlock, serialization failure) is re-run before the caller is told the
+   * slot is contended.
+   *
+   * 1 means "do not retry". This is an env var and not a constant because the
+   * right value is a measured trade-off, not a design opinion — see
+   * ARCHITECTURE.md Appendix B for the runs that chose it. Too low and a
+   * routine deadlock becomes a failed booking; too high and every retry holds a
+   * pool connection through another contended transaction, which under a
+   * 200-way pile-up on one slot exhausts the pool and turns a handful of
+   * deadlocks into a hundred connection timeouts.
+   */
+  TRANSIENT_RETRY_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+
   PAYGATE_BASE_URL: z.string().url().optional(),
   PAYGATE_SECRET: z.string().optional(),
 

@@ -23,6 +23,7 @@ import { log } from '../common/logger';
 import type { Env } from '../config/env';
 import type { AuthPrincipal } from '../common/context/request-context';
 import { getCorrelationId } from '../common/context/request-context';
+import { withTransientRetry } from '../common/retry-transaction';
 import {
   BookingStateMachine,
   SYSTEM_ACTOR,
@@ -123,7 +124,13 @@ export class PaymentsService {
   async pay(bookingId: string, principal: AuthPrincipal): Promise<unknown> {
     const idempotencyKey = chargeKey(bookingId);
 
-    const prepared = await this.db.transaction(async (tx) => {
+    // Retried on a class-40 rollback like the hold path, and safe for the same
+    // reason: everything in here is inside one transaction, and Paygate is not
+    // called until after it commits. A deadlock leaves nothing behind.
+    const prepared = await withTransientRetry(
+      'payments.pay',
+      () =>
+      this.db.transaction(async (tx) => {
       const booking = await this.loadOwned(tx, bookingId, principal);
 
       const existing = await this.findPaymentByKey(tx, idempotencyKey);
@@ -190,8 +197,10 @@ export class PaymentsService {
         });
       }
 
-      return { booking, payment, alreadySettled: false };
-    });
+        return { booking, payment, alreadySettled: false };
+      }),
+      this.env.TRANSIENT_RETRY_ATTEMPTS,
+    );
 
     if (prepared.alreadySettled) {
       return this.presentPayment(prepared.payment, 'replayed');
@@ -367,8 +376,14 @@ export class PaymentsService {
    * an HTTP round trip to a provider that deliberately hangs.
    */
   async applyDelivery(deliveryRowId: string): Promise<void> {
-    const instruction = await this.db.transaction(async (tx) =>
-      this.applyInTransaction(tx, deliveryRowId),
+    // Three replicas drain the same queue and each apply takes a booking row
+    // lock, so two deliveries for two bookings that share a room can deadlock.
+    // Transient, fully rolled back, and the delivery is still unprocessed —
+    // retrying here just saves waiting for the next sweep.
+    const instruction = await withTransientRetry(
+      'payments.applyDelivery',
+      () => this.db.transaction(async (tx) => this.applyInTransaction(tx, deliveryRowId)),
+      this.env.TRANSIENT_RETRY_ATTEMPTS,
     );
 
     if (instruction) await this.settleRefund(instruction);
@@ -732,7 +747,10 @@ export class PaymentsService {
    * captured charge, so there is nothing to refund and this is a no-op.
    */
   async settleCancellation(bookingId: string): Promise<RefundBreakdownView | null> {
-    const instruction = await this.db.transaction(async (tx) => {
+    const instruction = await withTransientRetry(
+      'payments.settleCancellation',
+      () =>
+      this.db.transaction(async (tx) => {
       const [booking] = await tx
         .select()
         .from(bookings)
@@ -802,7 +820,9 @@ export class PaymentsService {
         } satisfies RefundInstruction,
         breakdown,
       };
-    });
+      }),
+      this.env.TRANSIENT_RETRY_ATTEMPTS,
+    );
 
     if (!instruction) return null;
 
