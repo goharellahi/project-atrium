@@ -18,6 +18,66 @@ feature count.
 
 ---
 
+## Working Agreement
+
+Follow this every phase, without being reminded.
+
+### Git
+
+**The human handles GitHub. Claude handles the local repository only.** Never
+push, never open a PR, never merge, never touch a remote.
+
+- **One short-lived branch per phase.** Create it at the start of the phase if
+  it does not already exist:
+
+  | Phase | Branch |
+  | --- | --- |
+  | P1 | `feat/p1-schema-auth` |
+  | P2 | `feat/p2-booking-core` |
+  | P3 | `feat/p3-payments-paygate` |
+  | P4 | `feat/p4-concurrency-proof` |
+  | P5 | `feat/p5-tests-observability` |
+  | P6 | `feat/p6-frontend` |
+  | P7 | `feat/p7-performance` |
+  | P8 | `docs/p8-final` |
+
+- **Never commit to `main`.** `main` is merged into only by the human, via PR.
+- **Granular, conventional commits — one logical change each.** Schema,
+  migration, auth and deploy config are four commits, not one.
+  Format: `type(scope): subject`, e.g. `feat(db): booking exclusion constraint`.
+- **Never squash, never rebase, never amend a pushed commit, never force push.**
+  The brief grades commit history: *"a single squashed commit at the end scores
+  zero on process."*
+- **Keep the `Co-Authored-By` trailer.** The brief requires an `AI_LOG.md`;
+  hiding authorship while writing that file would contradict it.
+
+### Handoff protocol
+
+Every phase ends with a block titled exactly **`ACTIONS FOR ME`**, containing
+only what the human must do by hand, in order, ready to copy and paste. Nothing
+explanatory goes inside it. Three parts, and any empty part is omitted
+entirely:
+
+1. **GIT** — the exact push command with the real branch name, then the exact
+   `gh pr create` command with a filled-in title and body. PR title is
+   conventional-commit style scoped to the phase. PR body is four sections of
+   three lines or fewer: *What changed / Why it holds / What I cut / How to
+   verify*. Write the body as a real heredoc, pasteable as-is.
+2. **DASHBOARD** — numbered steps for Neon, Render, Vercel or GitHub settings,
+   with exact field values. Assume the reader is in a hurry and will not read
+   prose. State the order, and what proves each step worked.
+3. **DECISIONS** — only things genuinely blocked on human judgement. If nothing
+   is blocked, omit this part rather than inventing a question.
+
+Above that block: **at most five lines of summary**. What is done, anything
+that failed, what is next. Do not narrate what went right — the diff shows it.
+Report contradictions with the brief, things that could not be verified, and
+places where something was guessed. Those are the only things worth attention.
+
+When the human pastes output back, **act on it — do not restate or grade it.**
+
+---
+
 ## The six invariants
 
 These are the non-negotiable correctness properties. They are tested directly,
@@ -189,8 +249,8 @@ never be committed. Do not quote the brief at length in committed files.
 
 ## Current phase
 
-**P0 — scaffolding and design. Complete.**
-Next: **P1 — schema, extensions and constraints.**
+**P1 — schema, constraints, auth, deploy skeleton. In progress.**
+Next: **P2 — booking core: availability, holds, state machine.**
 
 See `PLAN.md` for the full phase list and the progress log.
 
