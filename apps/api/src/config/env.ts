@@ -48,6 +48,26 @@ const EnvSchema = z.object({
 
   PAYGATE_BASE_URL: z.string().url().optional(),
   PAYGATE_SECRET: z.string().optional(),
+
+  /**
+   * How long to wait on Paygate before giving up on one request.
+   *
+   * A timeout is NOT a failed charge — the provider may have accepted it and be
+   * about to deliver a webhook — so this bounds how long a customer waits, not
+   * whether they were charged. Kept below the hold TTL by a wide margin so a
+   * hung provider cannot silently consume the hold the payment is for.
+   */
+  PAYGATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8_000),
+
+  /**
+   * How often each replica attempts to drain unapplied webhook deliveries.
+   *
+   * Like the hold sweeper, all three attempt it and a Postgres advisory lock
+   * elects one per tick. Short, because the backlog it drains includes the
+   * race-on-response case where a delivery arrived a few milliseconds before
+   * the payments row it belongs to.
+   */
+  WEBHOOK_DRAIN_INTERVAL_SECONDS: z.coerce.number().int().positive().default(10),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
