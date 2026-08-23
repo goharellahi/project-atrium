@@ -840,6 +840,125 @@ export class PaymentsService {
   }
 
   /**
+   * Settle charges the provider accepted but never told us the outcome of.
+   *
+   * The charge-side twin of `settleAcceptedRefunds`, and it exists because a
+   * webhook can be lost for reasons that have nothing to do with chaos. On
+   * Render's free tier the API sleeps after fifteen idle minutes and answers
+   * 502 while it wakes; a delivery arriving in that window is refused, and
+   * Paygate never retries a delivery. Locally the same thing happens whenever a
+   * replica restarts mid-flight.
+   *
+   * Without this the booking sits PENDING_PAYMENT with a captured charge behind
+   * it until the hold lapses, and then EXPIRES — money at the provider, a
+   * customer with no booking, and nothing in the system that knows to ask.
+   *
+   * Only payments that already carry a `charge_id` are polled. A PENDING
+   * payment with no charge id is the 10% transient-failure branch: the customer
+   * saw the charge fail, and quietly charging them afterwards because a retry
+   * would have worked is not a repair, it is a surprise. Those are left to
+   * expire, and no money ever moved.
+   */
+  async settleAcceptedCharges(olderThanSeconds: number, limit = 50): Promise<number> {
+    const stale = await this.db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          eq(payments.status, 'PENDING'),
+          isNotNull(payments.chargeId),
+          lt(payments.createdAt, new Date(Date.now() - olderThanSeconds * 1000)),
+        ),
+      )
+      .limit(limit);
+
+    let settled = 0;
+
+    for (const payment of stale) {
+      if (!payment.chargeId) continue;
+
+      try {
+        const state = await this.provider.getCharge(payment.chargeId);
+
+        if (state === null) {
+          // Paygate keeps charges in memory and forgets them on restart, which
+          // on a free tier that sleeps is routine rather than alarming. There
+          // is nothing to apply and nothing was captured; the hold expires.
+          log().warn(
+            { paymentId: payment.id, chargeId: payment.chargeId },
+            'payment.charge.unknown_to_provider',
+          );
+          continue;
+        }
+
+        if (state.status === 'processing') continue;
+
+        const event = state.status === 'succeeded' ? 'charge.succeeded' : 'charge.failed';
+
+        // `applied` is reported separately from `instruction`, because a null
+        // instruction is ambiguous on its own: it means either "a delivery beat
+        // us to it" or "applied, and no refund was needed". Counting on it
+        // would inflate the repair count, and a money log line that overcounts
+        // is worse than no line at all.
+        const outcome = await withTransientRetry(
+          'payments.settleAcceptedCharges',
+          () =>
+            this.db.transaction(async (tx) => {
+              // The same gate the webhook path uses, so a delivery that turns
+              // up later finds the effect already applied.
+              const [claimed] = await tx
+                .insert(paymentEvents)
+                .values({ chargeId: payment.chargeId!, event, occurredAt: new Date() })
+                .onConflictDoNothing({
+                  target: [paymentEvents.chargeId, paymentEvents.event],
+                })
+                .returning({ id: paymentEvents.id });
+
+              if (!claimed) return { applied: false, instruction: null };
+
+              if (event === 'charge.failed') {
+                await this.onChargeFailed(tx, payment);
+                return { applied: true, instruction: null };
+              }
+
+              const instruction = await this.onChargeSucceeded(
+                tx,
+                payment,
+                payment.chargeId!,
+                new Date(),
+              );
+              return { applied: true, instruction };
+            }),
+          this.env.TRANSIENT_RETRY_ATTEMPTS,
+        );
+
+        if (!outcome.applied) continue;
+
+        // INV-4 can fire here just as it does from a delivery: the hold may
+        // have lapsed while the webhook was being lost.
+        if (outcome.instruction) await this.settleRefund(outcome.instruction);
+
+        settled += 1;
+        log().warn(
+          { paymentId: payment.id, chargeId: payment.chargeId, event },
+          'payment.charge.settled_by_polling',
+        );
+      } catch (err: unknown) {
+        log().error(
+          {
+            paymentId: payment.id,
+            chargeId: payment.chargeId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'payment.charge.poll_failed',
+        );
+      }
+    }
+
+    return settled;
+  }
+
+  /**
    * Settle refunds the provider accepted but never told us about.
    *
    * The webhook channel is at-least-once in principle and at-most-once in

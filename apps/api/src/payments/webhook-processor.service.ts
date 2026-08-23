@@ -165,13 +165,15 @@ export class WebhookProcessor implements OnApplicationBootstrap, OnApplicationSh
        * ago is not late, it is in flight, and polling it would be asking the
        * provider to confirm what its own webhook is about to say.
        */
-      const repaired = await this.payments.settleAcceptedRefunds(
-        this.env.REFUND_POLL_AFTER_SECONDS,
-      );
-      if (repaired > 0) {
+      const [charges, refunds] = [
+        await this.payments.settleAcceptedCharges(this.env.CHARGE_POLL_AFTER_SECONDS),
+        await this.payments.settleAcceptedRefunds(this.env.REFUND_POLL_AFTER_SECONDS),
+      ];
+
+      if (charges > 0 || refunds > 0) {
         logger.warn(
-          { repaired, replica: this.env.REPLICA_ID },
-          'refunds settled by polling the provider — their webhooks never arrived',
+          { charges, refunds, replica: this.env.REPLICA_ID },
+          'settled by polling the provider — these webhooks never arrived',
         );
       }
 

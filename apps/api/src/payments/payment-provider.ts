@@ -65,6 +65,14 @@ export interface RefundAccepted {
   status: 'ACCEPTED';
 }
 
+/** What the provider currently believes about a charge it accepted. */
+export interface ChargeState {
+  chargeId: string;
+  reference: string;
+  amountMinor: bigint;
+  status: 'processing' | 'succeeded' | 'failed';
+}
+
 /** What the provider currently believes about a refund it accepted. */
 export interface RefundState {
   refundId: string;
@@ -92,6 +100,18 @@ export interface PaymentProvider {
    * push — the system asks rather than waiting forever to be told.
    */
   getRefund(refundId: string): Promise<RefundState | null>;
+
+  /**
+   * Ask the provider what actually happened to a charge.
+   *
+   * The charge-side twin of `getRefund`, and it exists for the deployment
+   * rather than for chaos. On Render's free tier the API sleeps after fifteen
+   * idle minutes and answers 502 while it wakes, so a delivery that arrives
+   * during that window is refused — and Paygate, by design, never retries a
+   * delivery. Without this the booking sits PENDING_PAYMENT until its hold
+   * lapses, with a captured charge behind it and nobody asking.
+   */
+  getCharge(chargeId: string): Promise<ChargeState | null>;
 }
 
 /** Injection token. P3 binds the real Paygate client to it. */
@@ -116,6 +136,12 @@ export class UnimplementedPaymentProvider implements PaymentProvider {
   }
 
   getRefund(): Promise<RefundState | null> {
+    return Promise.reject(
+      new Error('Payment provider is not wired up until P3 (feat/p3-payments-paygate)'),
+    );
+  }
+
+  getCharge(): Promise<ChargeState | null> {
     return Promise.reject(
       new Error('Payment provider is not wired up until P3 (feat/p3-payments-paygate)'),
     );

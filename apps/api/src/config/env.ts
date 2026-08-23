@@ -94,6 +94,21 @@ const EnvSchema = z.object({
    * signature was corrupted, which are correctly rejected and never resent.
    */
   REFUND_POLL_AFTER_SECONDS: z.coerce.number().int().positive().default(45),
+
+  /**
+   * How long a charge may sit accepted-but-unresolved before the API stops
+   * waiting for a webhook and asks the provider directly.
+   *
+   * Longer than the refund equivalent because a charge's outcome legitimately
+   * takes longer to arrive: Paygate's delayed-delivery branch parks 5% of
+   * webhooks for 60-90 seconds, and polling inside that window would be asking
+   * the provider to confirm what its own delivery is about to say.
+   *
+   * Comfortably shorter than HOLD_TTL_SECONDS, which is the point. A charge
+   * whose webhook was lost has to be resolved while the hold it belongs to is
+   * still live, or the booking expires holding money.
+   */
+  CHARGE_POLL_AFTER_SECONDS: z.coerce.number().int().positive().default(100),
 });
 
 export type Env = z.infer<typeof EnvSchema>;
