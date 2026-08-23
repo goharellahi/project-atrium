@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Render blueprint — API only.
+# Render blueprint — API and Paygate.
 #
 # Zero cost is a hard requirement of the brief. Everything here is on a free
 # plan and needs no card. The web frontend goes to Vercel (see apps/web/vercel.json),
@@ -20,6 +20,42 @@
 #   - 512 MB RAM / 0.1 CPU, which is why argon2 is tuned to 19 MiB per hash
 #   - Render free Postgres expires after 30 days
 #   - no pre-deploy hooks, no shell access: migrations run in the start command
+#
+# TWO SERVICES, AND WHY THE SECOND ONE EXISTS.
+# The API needs a payment provider to demonstrate INV-3, INV-4 and INV-5 on the
+# deployed instance. Without one it binds a stub that refuses every call, so the
+# whole payment half of the brief could only be shown locally. Paygate is
+# therefore deployed alongside it — a separate service on a separate port,
+# reached over HTTP, exactly as in docker compose. An in-process stub would have
+# been simpler and would have proved nothing: the failure modes only exist
+# because the provider is genuinely remote.
+#
+# TWO URLS THAT CANNOT BE WRITTEN HERE.
+# Render assigns each service a hostname with an unguessable suffix
+# (atrium-api-3p3j.onrender.com), so neither PAYGATE_BASE_URL nor
+# PAYGATE_CALLBACK_URL can be committed. Both are declared `sync: false` and
+# filled in from the dashboard after the first deploy — one paste each, and the
+# blueprint stays valid on a fresh account where those hostnames do not exist
+# yet. The shared HMAC secret is NOT handled that way: Paygate reads the API's
+# generated value through `fromService`, so the secret is never copied by hand
+# and never appears in a commit.
+#
+# WHAT THE DEPLOYED PAYGATE CANNOT DO.
+# `NODE_ENV=production` is baked into its Dockerfile, and Paygate refuses to
+# register the /paygate/_test/* control surface in production regardless of the
+# flag. So the deployed instance cannot force a scenario; it is the chaotic
+# provider the brief describes, and deterministic scenarios stay local where the
+# e2e suite drives them.
+#
+# WHAT SLEEPS BREAKS, AND WHAT CATCHES IT.
+# Both services sleep after 15 idle minutes. A webhook delivered while the API
+# is waking is refused with 502, and Paygate never retries a delivery — so on
+# this tier a lost webhook is normal rather than exceptional. That is what
+# CHARGE_POLL_AFTER_SECONDS and REFUND_POLL_AFTER_SECONDS are for: the API asks
+# the provider for outcomes it was never told about. Paygate holds state in
+# memory, so its own sleep forgets every charge; the API treats "the provider
+# has never heard of it" as an answer and lets the hold expire, which is
+# correct, because no money moved.
 # ---------------------------------------------------------------------------
 databases:
   - name: atrium-db
@@ -97,3 +133,66 @@ services:
         value: "1800"
       - key: ROOM_TURNAROUND_MINUTES
         value: "15"
+      # Paste the Paygate service URL here after its first deploy. Until it is
+      # set the API binds the stub provider and every payment fails loudly,
+      # which is the correct behaviour for a misconfigured deployment — see
+      # PaymentsModule.
+      - key: PAYGATE_BASE_URL
+        sync: false
+      - key: PAYGATE_TIMEOUT_MS
+        value: "8000"
+      - key: WEBHOOK_DRAIN_INTERVAL_SECONDS
+        value: "10"
+      # Both poll thresholds matter more here than locally: on a tier that
+      # sleeps, a delivery refused during a cold start is lost for good.
+      # CHARGE must stay well below HOLD_TTL_SECONDS, or a charge whose webhook
+      # was lost is only noticed after the hold it belongs to has expired.
+      - key: CHARGE_POLL_AFTER_SECONDS
+        value: "100"
+      - key: REFUND_POLL_AFTER_SECONDS
+        value: "45"
+      - key: TRANSIENT_RETRY_ATTEMPTS
+        value: "3"
+
+  # -------------------------------------------------------------------------
+  # The mock payment provider. Deliberately unreliable, per brief section 06.
+  # -------------------------------------------------------------------------
+  - type: web
+    name: atrium-paygate
+    runtime: docker
+    plan: free
+    region: oregon
+    dockerfilePath: ./apps/paygate/Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    envVars:
+      - key: PAYGATE_PORT
+        value: "9000"
+      - key: PORT
+        value: "9000"
+      - key: LOG_LEVEL
+        value: info
+      # Read from the API rather than generated again here. Two independently
+      # generated secrets would leave every signature failing verification, and
+      # the symptom — every webhook 401, nothing ever confirmed — looks nothing
+      # like a configuration problem from the outside.
+      - key: PAYGATE_SECRET
+        fromService:
+          type: web
+          name: atrium-api
+          envVarKey: PAYGATE_SECRET
+      # Paste the API service URL + /webhooks/paygate here after its first
+      # deploy. With no callback URL Paygate still boots, warns, and records
+      # every delivery as skipped rather than pretending to have sent it.
+      - key: PAYGATE_CALLBACK_URL
+        sync: false
+      # On, because the brief's provider is unreliable and a reviewer testing
+      # the deployed instance should meet the provider the brief describes. A
+      # 502 from POST /bookings/:id/pay is the specified 10% transient branch;
+      # retrying the same booking cannot charge twice.
+      - key: PAYGATE_CHAOS
+        value: "on"
+      # Fixed, so a chaotic run on the deployed instance is replayable rather
+      # than merely chaotic.
+      - key: PAYGATE_SEED
+        value: atrium-render
