@@ -14,11 +14,13 @@
 -- off the webhook_deliveries row Paygate's callback produced, with no log
 -- scraping in between.
 --
--- Nullable, and it stays nullable. A delivery posted straight at the API with
--- no X-Request-Id header — which is what a bad-signature or unknown-charge test
--- does — has no inbound id to inherit, and inventing one would make the column
--- lie about provenance. NULL means "nothing upstream named this request", and
--- that is a true statement worth being able to make.
+-- Nullable, and it stays nullable. Behind the compose stack nginx names every
+-- request, so in practice this is always populated there; on Render there is no
+-- load balancer in front of the API and a delivery can genuinely arrive with no
+-- X-Request-Id at all. Storing a locally minted UUID in that case would make the
+-- column lie about provenance — an id we invented correlates this request with
+-- nothing. NULL means "nothing upstream named this request", and that is a true
+-- statement worth being able to make.
 --
 -- Existing rows are not back-filled for the same reason.
 -- ---------------------------------------------------------------------------

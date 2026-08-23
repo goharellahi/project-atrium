@@ -1,0 +1,305 @@
+Timing is off.
+Pager usage is off.
+===========================================================================
+PARAMETERS
+===========================================================================
+               room_id                |               venue_id               |  city   |   timezone   |          equipment_type_id           
+--------------------------------------+--------------------------------------+---------+--------------+--------------------------------------
+ 01fd40d0-eb9e-4e37-939d-cce21f64a76e | e2ebec02-970f-4e3a-a10b-a97cf6b5f07d | Karachi | Asia/Karachi | 6832aafa-eedd-48ba-99c3-7cd37ab929d8
+(1 row)
+
+        window_from        |         window_to         | candidate_rooms 
+---------------------------+---------------------------+-----------------
+ 2026-08-25T02:00:00+00:00 | 2026-08-25T04:00:00+00:00 |             251
+(1 row)
+
+ bookings | rooms | first_day  |  last_day  
+----------+-------+------------+------------
+   250000 |   799 | 2025-02-24 | 2027-02-24
+(1 row)
+
+
+===========================================================================
+Q1  room availability, 7 day range
+    apps/api/src/rooms/availability.service.ts :: busyIntervals
+===========================================================================
+                                                                       QUERY PLAN                                                                        
+---------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=8.33..8.34 rows=1 width=16) (actual time=0.883..0.884 rows=6 loops=1)
+   Sort Key: (lower(slot))
+   Sort Method: quicksort  Memory: 25kB
+   Buffers: shared hit=28
+   ->  Index Scan using no_room_overlap on bookings  (cost=0.29..8.32 rows=1 width=16) (actual time=0.857..0.862 rows=6 loops=1)
+         Index Cond: ((room_id = '01fd40d0-eb9e-4e37-939d-cce21f64a76e'::uuid) AND (slot && tstzrange(now(), (now() + '7 days'::interval), '[)'::text)))
+         Filter: ((status <> 'HELD'::booking_status) OR (expires_at IS NULL) OR (expires_at > now()))
+         Buffers: shared hit=28
+ Planning:
+   Buffers: shared hit=24
+ Planning Time: 0.827 ms
+ Execution Time: 0.936 ms
+(12 rows)
+
+
+===========================================================================
+Q2  cross-venue search, combined filters — candidate page
+    apps/api/src/search/search.service.ts :: page
+===========================================================================
+                                                         QUERY PLAN                                                          
+-----------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=37.13..37.29 rows=62 width=165) (actual time=0.850..0.859 rows=52 loops=1)
+   Buffers: shared hit=20
+   ->  Sort  (cost=37.13..37.29 rows=62 width=165) (actual time=0.849..0.853 rows=52 loops=1)
+         Sort Key: r.hourly_rate_minor, r.id
+         Sort Method: quicksort  Memory: 38kB
+         Buffers: shared hit=20
+         ->  Hash Join  (cost=3.77..35.29 rows=62 width=165) (actual time=0.182..0.754 rows=52 loops=1)
+               Hash Cond: (r.venue_id = v.id)
+               Buffers: shared hit=20
+               ->  Seq Scan on rooms r  (cost=0.00..31.00 rows=178 width=130) (actual time=0.038..0.492 rows=180 loops=1)
+                     Filter: ((capacity >= 8) AND (hourly_rate_minor <= 900000) AND (amenities @> '{wifi}'::text[]))
+                     Rows Removed by Filter: 620
+                     Buffers: shared hit=17
+               ->  Hash  (cost=3.60..3.60 rows=14 width=51) (actual time=0.125..0.125 rows=14 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 10kB
+                     Buffers: shared hit=3
+                     ->  Seq Scan on venues v  (cost=0.00..3.60 rows=14 width=51) (actual time=0.056..0.098 rows=14 loops=1)
+                           Filter: (lower(city) = 'karachi'::text)
+                           Rows Removed by Filter: 26
+                           Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=71
+ Planning Time: 2.067 ms
+ Execution Time: 0.965 ms
+(24 rows)
+
+
+===========================================================================
+Q3  cross-venue search — which candidates are free in the window
+    apps/api/src/rooms/availability.service.ts :: freeRoomIds
+===========================================================================
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      QUERY PLAN                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Unique  (cost=59.44..59.46 rows=5 width=16) (actual time=0.507..0.518 rows=29 loops=1)
+   Buffers: shared hit=48
+   ->  Sort  (cost=59.44..59.45 rows=5 width=16) (actual time=0.506..0.508 rows=29 loops=1)
+         Sort Key: room_id
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=48
+         ->  Bitmap Heap Scan on bookings b  (cost=5.02..59.38 rows=5 width=16) (actual time=0.375..0.485 rows=29 loops=1)
+               Recheck Cond: ((slot && tstzrange('2026-08-25 02:00:00+00'::timestamp with time zone, ('2026-08-25 04:00:00+00'::timestamp with time zone + '00:15:00'::interval), '[)'::text)) AND (status = ANY ('{HELD,PENDING_PAYMENT,CONFIRMED}'::booking_status[])))
+               Filter: ((room_id = ANY ('{… candidate room ids elided …}'::uuid[])) AND ((status <> 'HELD'::booking_status) OR (expires_at IS NULL) OR (expires_at > now())))
+               Rows Removed by Filter: 16
+               Heap Blocks: exact=45
+               Buffers: shared hit=48
+               ->  Bitmap Index Scan on bookings_active_slot_idx  (cost=0.00..4.39 rows=14 width=0) (actual time=0.249..0.249 rows=45 loops=1)
+                     Index Cond: (slot && tstzrange('2026-08-25 02:00:00+00'::timestamp with time zone, ('2026-08-25 04:00:00+00'::timestamp with time zone + '00:15:00'::interval), '[)'::text))
+                     Buffers: shared hit=3
+ Planning:
+   Buffers: shared hit=4
+ Planning Time: 1.356 ms
+ Execution Time: 0.634 ms
+(19 rows)
+
+
+===========================================================================
+Q4  create hold — in-transaction expiry of stale holds for this room
+    apps/api/src/bookings/booking-state-machine.service.ts
+    :: expireStaleHoldsForRoom  (EXPLAIN only; the UPDATE is not executed)
+===========================================================================
+                                            QUERY PLAN                                             
+---------------------------------------------------------------------------------------------------
+ Update on bookings  (cost=0.30..7.96 rows=0 width=0)
+   ->  Index Scan using bookings_status_expires_idx on bookings  (cost=0.30..7.96 rows=1 width=18)
+         Index Cond: ((status = 'HELD'::booking_status) AND (expires_at < now()))
+         Filter: (room_id = '01fd40d0-eb9e-4e37-939d-cce21f64a76e'::uuid)
+(4 rows)
+
+
+===========================================================================
+Q5  create hold — equipment sweep line, peak concurrent usage
+    apps/api/src/bookings/equipment-availability.ts :: peakConcurrentUsage
+===========================================================================
+                                                                                                                                                            QUERY PLAN                                                                                                                                                            
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=3347.17..3349.57 rows=48 width=20) (actual time=3.684..3.688 rows=1 loops=1)
+   Group Key: overlapping.equipment_type_id
+   Buffers: shared hit=1849
+   CTE overlapping
+     ->  Nested Loop  (cost=9.32..3344.09 rows=24 width=36) (actual time=3.358..3.541 rows=1 loops=1)
+           Buffers: shared hit=1846
+           ->  Bitmap Heap Scan on booking_line_items li  (cost=8.90..914.44 rows=594 width=36) (actual time=0.062..0.208 rows=563 loops=1)
+                 Recheck Cond: (equipment_type_id = ANY ('{6832aafa-eedd-48ba-99c3-7cd37ab929d8}'::uuid[]))
+                 Heap Blocks: exact=10
+                 Buffers: shared hit=12
+                 ->  Bitmap Index Scan on booking_line_items_equipment_idx  (cost=0.00..8.75 rows=594 width=0) (actual time=0.053..0.053 rows=563 loops=1)
+                       Index Cond: (equipment_type_id = ANY ('{6832aafa-eedd-48ba-99c3-7cd37ab929d8}'::uuid[]))
+                       Buffers: shared hit=2
+           ->  Index Only Scan using bookings_id_window_idx on bookings b  (cost=0.42..4.09 rows=1 width=32) (actual time=0.006..0.006 rows=0 loops=563)
+                 Index Cond: (id = li.booking_id)
+                 Filter: ((starts_at < '2026-08-25 04:00:00+00'::timestamp with time zone) AND (ends_at > '2026-08-25 02:00:00+00'::timestamp with time zone) AND (status = ANY ('{HELD,PENDING_PAYMENT,CONFIRMED}'::booking_status[])) AND ((status <> 'HELD'::booking_status) OR (expires_at IS NULL) OR (expires_at > now())))
+                 Rows Removed by Filter: 1
+                 Heap Fetches: 144
+                 Buffers: shared hit=1834
+   ->  WindowAgg  (cost=3.08..4.16 rows=48 width=36) (actual time=3.657..3.677 rows=2 loops=1)
+         Buffers: shared hit=1849
+         ->  Sort  (cost=3.08..3.20 rows=48 width=32) (actual time=3.628..3.630 rows=2 loops=1)
+               Sort Key: overlapping.equipment_type_id, overlapping.window_start, (1)
+               Sort Method: quicksort  Memory: 25kB
+               Buffers: shared hit=1849
+               ->  Result  (cost=0.00..1.74 rows=48 width=32) (actual time=3.365..3.553 rows=2 loops=1)
+                     Buffers: shared hit=1846
+                     ->  Append  (cost=0.00..1.26 rows=48 width=32) (actual time=3.364..3.551 rows=2 loops=1)
+                           Buffers: shared hit=1846
+                           ->  CTE Scan on overlapping  (cost=0.00..0.48 rows=24 width=32) (actual time=3.363..3.545 rows=1 loops=1)
+                                 Buffers: shared hit=1846
+                           ->  CTE Scan on overlapping overlapping_1  (cost=0.00..0.54 rows=24 width=32) (actual time=0.003..0.003 rows=1 loops=1)
+ Planning:
+   Buffers: shared hit=38
+ Planning Time: 1.754 ms
+ Execution Time: 4.030 ms
+(36 rows)
+
+
+===========================================================================
+Q6  venue revenue report, 30 days — totals
+    apps/api/src/reports/reports.service.ts :: totals
+===========================================================================
+                                                                           QUERY PLAN                                                                           
+----------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=940.97..941.01 rows=1 width=96) (actual time=0.518..0.520 rows=1 loops=1)
+   Buffers: shared hit=29
+   ->  Bitmap Heap Scan on bookings b  (cost=11.97..926.37 rows=278 width=32) (actual time=0.081..0.178 rows=308 loops=1)
+         Recheck Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+         Heap Blocks: exact=25
+         Buffers: shared hit=29
+         ->  Bitmap Index Scan on bookings_venue_starts_idx  (cost=0.00..11.90 rows=278 width=0) (actual time=0.066..0.067 rows=308 loops=1)
+               Index Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+               Buffers: shared hit=4
+ Planning:
+   Buffers: shared hit=43
+ Planning Time: 0.778 ms
+ Execution Time: 0.733 ms
+(13 rows)
+
+
+===========================================================================
+Q7  venue revenue report, 30 days — refunds
+    apps/api/src/reports/reports.service.ts :: refunded
+===========================================================================
+                                                                              QUERY PLAN                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Aggregate  (cost=3123.36..3123.37 rows=1 width=32) (actual time=5.185..5.187 rows=1 loops=1)
+   Buffers: shared hit=1211
+   ->  Nested Loop  (cost=12.39..3122.78 rows=231 width=8) (actual time=0.141..5.082 rows=258 loops=1)
+         Buffers: shared hit=1211
+         ->  Bitmap Heap Scan on bookings b  (cost=11.97..926.37 rows=278 width=16) (actual time=0.083..0.246 rows=308 loops=1)
+               Recheck Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+               Heap Blocks: exact=25
+               Buffers: shared hit=29
+               ->  Bitmap Index Scan on bookings_venue_starts_idx  (cost=0.00..11.90 rows=278 width=0) (actual time=0.072..0.072 rows=308 loops=1)
+                     Index Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+                     Buffers: shared hit=4
+         ->  Index Scan using payments_booking_idx on payments p  (cost=0.42..7.89 rows=1 width=24) (actual time=0.014..0.014 rows=1 loops=308)
+               Index Cond: (booking_id = b.id)
+               Buffers: shared hit=1182
+ Planning:
+   Buffers: shared hit=104
+ Planning Time: 3.265 ms
+ Execution Time: 5.408 ms
+(18 rows)
+
+
+===========================================================================
+Q8  venue revenue report, 30 days — per room
+    apps/api/src/reports/reports.service.ts :: byRoom
+===========================================================================
+                                                                                 QUERY PLAN                                                                                 
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Sort  (cost=987.29..987.98 rows=278 width=68) (actual time=1.710..1.714 rows=20 loops=1)
+   Sort Key: ((COALESCE(sum(b.total_minor) FILTER (WHERE (b.status = ANY ('{CONFIRMED,COMPLETED}'::booking_status[]))), '0'::numeric))::text) DESC, b.room_id
+   Sort Method: quicksort  Memory: 26kB
+   Buffers: shared hit=49
+   ->  HashAggregate  (cost=969.05..976.00 rows=278 width=68) (actual time=1.551..1.573 rows=20 loops=1)
+         Group Key: b.room_id, r.name
+         Batches: 1  Memory Usage: 45kB
+         Buffers: shared hit=46
+         ->  Hash Join  (cost=46.97..962.10 rows=278 width=56) (actual time=0.819..1.145 rows=308 loops=1)
+               Hash Cond: (b.room_id = r.id)
+               Buffers: shared hit=46
+               ->  Bitmap Heap Scan on bookings b  (cost=11.97..926.37 rows=278 width=44) (actual time=0.123..0.278 rows=308 loops=1)
+                     Recheck Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+                     Heap Blocks: exact=25
+                     Buffers: shared hit=29
+                     ->  Bitmap Index Scan on bookings_venue_starts_idx  (cost=0.00..11.90 rows=278 width=0) (actual time=0.108..0.108 rows=308 loops=1)
+                           Index Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+                           Buffers: shared hit=4
+               ->  Hash  (cost=25.00..25.00 rows=800 width=28) (actual time=0.674..0.675 rows=800 loops=1)
+                     Buckets: 1024  Batches: 1  Memory Usage: 56kB
+                     Buffers: shared hit=17
+                     ->  Seq Scan on rooms r  (cost=0.00..25.00 rows=800 width=28) (actual time=0.009..0.219 rows=800 loops=1)
+                           Buffers: shared hit=17
+ Planning:
+   Buffers: shared hit=27
+ Planning Time: 1.261 ms
+ Execution Time: 2.047 ms
+(27 rows)
+
+
+===========================================================================
+Q9  venue revenue report, 30 days — per venue-local day
+    apps/api/src/reports/reports.service.ts :: byDay
+===========================================================================
+                                                                              QUERY PLAN                                                                              
+----------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ GroupAggregate  (cost=939.74..950.84 rows=277 width=68) (actual time=1.610..1.799 rows=13 loops=1)
+   Group Key: (to_char(date_trunc('day'::text, (starts_at AT TIME ZONE 'Asia/Karachi'::text)), 'YYYY-MM-DD'::text))
+   Buffers: shared hit=29
+   ->  Sort  (cost=939.74..940.44 rows=278 width=44) (actual time=1.580..1.607 rows=308 loops=1)
+         Sort Key: (to_char(date_trunc('day'::text, (starts_at AT TIME ZONE 'Asia/Karachi'::text)), 'YYYY-MM-DD'::text))
+         Sort Method: quicksort  Memory: 41kB
+         Buffers: shared hit=29
+         ->  Bitmap Heap Scan on bookings b  (cost=11.97..928.46 rows=278 width=44) (actual time=0.447..1.231 rows=308 loops=1)
+               Recheck Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+               Heap Blocks: exact=25
+               Buffers: shared hit=29
+               ->  Bitmap Index Scan on bookings_venue_starts_idx  (cost=0.00..11.90 rows=278 width=0) (actual time=0.060..0.061 rows=308 loops=1)
+                     Index Cond: ((venue_id = 'e2ebec02-970f-4e3a-a10b-a97cf6b5f07d'::uuid) AND (starts_at >= (now() - '30 days'::interval)) AND (starts_at < now()))
+                     Buffers: shared hit=4
+ Planning:
+   Buffers: shared hit=1
+ Planning Time: 0.403 ms
+ Execution Time: 1.958 ms
+(18 rows)
+
+
+===========================================================================
+INDEXES PRESENT AT CAPTURE TIME
+===========================================================================
+                 index                  |    size    |  scans  
+----------------------------------------+------------+---------
+ booking_line_items_booking_idx         | 3568 kB    |   27864
+ booking_line_items_equipment_idx       | 800 kB     |   13362
+ booking_line_items_pkey                | 3536 kB    |       0
+ bookings_active_slot_idx               | 3432 kB    |       2
+ bookings_id_window_idx                 | 16 MB      |    1138
+ bookings_pkey                          | 9400 kB    | 2658603
+ bookings_room_held_expiry_idx          | 8192 bytes |       0
+ bookings_room_starts_idx               | 16 MB      |    3523
+ bookings_status_expires_idx            | 1600 kB    |   39385
+ bookings_user_idx                      | 2376 kB    |      14
+ bookings_venue_idx                     | 1736 kB    |      99
+ bookings_venue_starts_idx              | 7352 kB    |      10
+ no_room_overlap                        | 5872 kB    |  156265
+ payments_booking_idx                   | 8720 kB    |   64143
+ payments_charge_id_unique              | 18 MB      |   60319
+ payments_idempotency_key_unique        | 18 MB      |   10537
+ payments_pkey                          | 8944 kB    |    9898
+ payments_refund_id_unique              | 1912 kB    |      38
+ payments_refund_idempotency_key_unique | 1912 kB    |       2
+ rooms_pkey                             | 56 kB      |  815862
+ rooms_venue_idx                        | 16 kB      |   45339
+ venues_city_idx                        | 16 kB      |       0
+ venues_city_lower_idx                  | 16 kB      |       0
+ venues_pkey                            | 16 kB      |  599501
+(24 rows)
+
