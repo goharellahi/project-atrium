@@ -3,13 +3,18 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "The mandatory 200-request concurrency proof (brief §05).",
+  "description": "The mandatory 200-request concurrency proof. Run with `pnpm proof` against a live docker compose stack.",
   "scripts": {
     "test": "vitest run --passWithNoTests",
+    "proof": "vitest run --config vitest.proof.config.ts --reporter=verbose",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
   },
   "devDependencies": {
     "@types/node": "26.0.0",
+    "@types/pg": "8.15.6",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
   }

@@ -202,6 +202,29 @@ that relied on the sweeper alone. The in-transaction expiry closes the window;
 the sweeper exists so expired holds are released promptly for *availability
 queries* and reporting, not only when someone happens to contend the slot.
 
+### What survived contact with the implementation (P2)
+
+The strategy above was committed in P0, before any hold code existed. Building
+it in P2 changed none of the mechanism and two of the details:
+
+1. **The equipment sweep line needs an explicit tie-break at equal instants.**
+   Ends must sort before starts. Intervals are half open, so a booking ending
+   at 14:00 has released its units before one starting at 14:00 takes them;
+   ordering starts first reports a phantom peak at every back-to-back handover
+   and refuses legal bookings. The draft said "order the events" without saying
+   in which order equal events go, which is where the bug would have lived.
+
+2. **The equipment check runs BEFORE the room INSERT, not after.** The draft
+   left the order open. The room INSERT can block on the exclusion index behind
+   another transaction, and holding equipment row locks while blocked there
+   widens the equipment contention window to include room contention for no
+   benefit. Deciding equipment first keeps each lock held for exactly the
+   queries that need it.
+
+Neither is a change of approach. Both are the kind of detail that only appears
+when the code has to run, which is the argument for the proof in Appendix A
+rather than for a longer design document.
+
 ### One correction to this draft, found while building it (P1)
 
 The migration as originally specified did not run. Postgres rejected it:
@@ -298,6 +321,53 @@ rather than deduplicated on delivery id; what happens to a webhook for an
 unknown charge; and the INV-4 sequence where a hold expires while payment is in
 flight.*
 
+The provider half is built (P3, `apps/paygate/`). Full detail —
+env vars, the six chaos behaviours, how to force a scenario, a worked signature
+verification — is in `apps/paygate/README.md`. The declared deviations from the
+brief are mirrored here, because an addition that is declared reads as
+engineering judgement and the same code undeclared reads as having misread the
+spec.
+
+### Extensions to the brief's §06 spec (Paygate)
+
+Every item is **additive**: nothing the brief specifies behaves differently
+because of it.
+
+| # | Extension | Why |
+| --- | --- | --- |
+| 1 | Events `charge.failed` and `refund.succeeded` | The brief names only `charge.succeeded`. Without the other two the FAILED and REFUNDED states are unreachable, and INV-4 — hold expires, payment succeeds, money is automatically refunded — has no evidence the refund settled. |
+| 2 | A `refund_id` field on `refund.succeeded` bodies | The correlation key for a refund. The signature still covers the whole body; a receiver ignoring unknown fields is unaffected. |
+| 3 | `POST /paygate/_test/deliver` and `POST /paygate/_test/delay` | A chaos rate is a property of the population, not of any one run. An INV-3 test waiting for the 30% duplicate branch, or an INV-4 test hoping for the 5% late branch, is a coin flip rather than a test. These make both deterministic. |
+| 4 | `PAYGATE_DECLINE_AMOUNT_MINOR` — a magic decline amount | `charge.failed` has to be reachable on demand, but the brief's chaos table asks for no random declines — and a random decline inside the 200-request proof would be indistinguishable from a real bug. A fixed trigger amount is how real test providers do this. |
+| 5 | `PAYGATE_SEED` — replayable chaos | Unspecified in the brief. A chaotic test double whose branches cannot be reproduced is a coin flip; when a 200-request run turns up one bad booking, replaying the exact chaos is the only way to debug it. Seeded per decision from `(seed, Idempotency-Key)`, not from one global stream, so replay survives concurrency. |
+| 6 | `GET /paygate/charges/:id` and `GET /paygate/refunds/:id` | Read-only. Lets a reviewer see every delivery attempt and the chaos branch each took. |
+| 7 | `X-Request-Id` echoed on every webhook delivery | Not in §06's header list, but §09 Tier 2 requires a correlation id that survives into the webhook path. |
+| 8 | `PAYGATE_WEBHOOK_URL` accepted as an alias for `PAYGATE_CALLBACK_URL` | `docker-compose.yml` uses the second name. Accepting both meant no shared file had to change; the brief's name wins if both are set. |
+
+The `/paygate/_test/*` routes forge signed webhooks and take no authentication.
+They live in their own module (`src/test-routes.ts`) so the boundary between the
+specified provider and added scaffolding is a file boundary rather than a
+comment, and they **refuse to register under `NODE_ENV=production`** regardless
+of `PAYGATE_TEST_ENDPOINTS`. That is not a security control — Paygate holds no
+real money — but a legibility one: nobody reading a production route table
+should have to work out whether an unauthenticated webhook forger is scaffolding
+or an oversight.
+
+### Two implementation choices worth naming
+
+**The idempotency record is written before the transient-failure branch is
+evaluated.** The obvious order — decide the 500 first, record only on success —
+cannot satisfy "a retry with the same Idempotency-Key must not produce a second
+charge", because after a 500 the key is unknown and the retry mints a new
+charge. Writing the key first means the charge id survives the 500; the charge
+exists but is not *materialised* — no outcome, no webhook — until a retry adopts
+it.
+
+**Race-on-response (25%) and delayed delivery (5%) are drawn from a single
+uniform, not two independent coins.** A delivery cannot both precede the 202 and
+arrive 60 seconds late. Independent draws would have silently produced
+25% × 95% = 23.75% races instead of the specified 25%.
+
 ---
 
 ## 5. Indexing and Query Strategy
@@ -380,6 +450,29 @@ from "no such booking" and enumerate another venue's identifiers. The cost is
 worse ergonomics for legitimate users, who cannot tell a typo from a
 permissions problem. Accepted.
 
+**7. The 15-minute turnaround applies to rooms, not to equipment.** (P2.)
+`bookings.slot` carries the buffer because a physical room needs cleaning
+between occupants, and the exclusion constraint compares `slot` against `slot`.
+The equipment sweep line deliberately uses raw `starts_at`/`ends_at` instead. A
+tripod handed back at 14:00 is available at 14:00; applying the room buffer
+there would silently reserve a quarter hour on every equipment booking that
+nothing in the brief asks for, cutting effective fleet capacity for no stated
+reason. The asymmetry is deliberate and is the reason the two mechanisms read
+different columns.
+
+**8. Cross-venue search is not an INV-6 exception.** (P2.) `GET /search` returns
+rooms from every venue and is not tenant-scoped. Tenant isolation protects a
+venue's bookings, customers and revenue — not the existence of its rooms, which
+is precisely the catalogue a marketplace exists to publish. Nothing operational
+crosses a venue boundary on that endpoint: no booking, no customer, no
+occupancy. The isolation tests target the endpoints that do carry that data.
+
+**9. An expired hold is never revived.** (P2.) Checkout refuses to re-arm a hold
+whose `expires_at` has passed, and expires it properly on the way out rather
+than reporting a stale row as live. Reviving it would hand back a slot another
+customer may already legitimately hold. This is INV-4's shape appearing before
+payments exist: expiry is a one-way door.
+
 ---
 
 ## 8. What Breaks at 100x
@@ -397,4 +490,99 @@ what to do about each.*
 
 ## Appendix A — Concurrency proof output
 
-*Stub — P6. Raw output of the 200-request proof, pasted verbatim.*
+Run against `docker compose up` — Postgres, three API replicas, nginx
+round-robin on :8080 — with:
+
+```bash
+pnpm proof
+```
+
+Source: `tests/concurrency/src/hold.proof.test.ts`. The fixtures are owned by
+the test, not read from the seed.
+
+Pasted verbatim, 2026-08-23:
+
+```text
+==============================================================================
+ATRIUM CONCURRENCY PROOF
+==============================================================================
+target            http://localhost:8080  (nginx -> api1, api2, api3)
+concurrency       200 requests, released together
+contended room    5607c198-832b-461b-89b5-3d1e59772e72
+contended slot    2026-08-26T05:00:00.000Z .. 2026-08-26T06:00:00.000Z
+equipment type    abe253aa-f8ff-498f-96f2-50145e5413fd  (units_owned = 3)
+
+-- INV-1: same room, same one-hour slot --------------------------------
+  responses        201 x1, 409 x199
+  replica spread   api1=68 api2=67 api3=65
+  distinct booking f88ec188-a7dc-4428-8e11-08be9e6dc9d2
+
+-- INV-1 re-read from Postgres ----------------------------------------
+  active bookings overlapping the slot: 1
+  ids: ["f88ec188-a7dc-4428-8e11-08be9e6dc9d2"]
+
+-- INV-2: 200 distinct rooms, 1 unit each, 3 units owned ----------
+  responses        201 x3, 409 x197
+  replica spread   api1=65 api2=68 api3=67
+  admitted         3 (ceiling 3)
+
+-- INV-2 re-read from Postgres ----------------------------------------
+  units_owned                    3
+  peak concurrent usage          3
+  total units reserved (rows)    3
+
+-- run summary --------------------------------------------------------
+  total requests   400
+  5xx responses    0
+  replicas seen    api1, api2, api3
+  per replica      api1=133 api2=135 api3=132
+==============================================================================
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Duration  3.23s
+```
+
+### What each line is there to rule out
+
+**`201 x1, 409 x199`** — INV-1. One winner, and every loser got a clean 409.
+A single 500 in that column would mean the exclusion violation escaped as a
+server error: the data would still be intact, but it would be a correctness
+failure by the brief's own terms, and it is exactly what happens if the
+SQLSTATE check does not walk Drizzle's `cause` chain.
+
+**`replica spread api1=68 api2=67 api3=65`** — without this the run proves
+nothing. An in-process mutex passes a 200-request test served entirely by one
+replica. The header comes from the API itself (`x-replica-id`), not from
+nginx's `$upstream_addr`, so the assertion reads as replica names rather than
+as container IPs that change on every `compose up`.
+
+**`200 distinct rooms`** on the equipment run — the detail most easily got
+wrong. Pointed at a single room, `no_room_overlap` rejects 199 requests before
+the equipment check ever executes, and the test passes green while proving
+nothing whatsoever about INV-2. Distinct rooms remove the room constraint from
+the picture so the only thing that can bound the successes is the equipment
+admission check.
+
+**`peak concurrent usage 3`, re-read from Postgres** — the HTTP responses can
+be right while the rows are wrong. This is a second, independently written
+sweep-line query run directly against the database after the burst. Asking the
+API would only establish that the application agrees with itself.
+
+**`5xx responses 0`** across all 400 requests. Under 200-way contention on one
+row, a deadlock (40P01), a lock timeout, or an unhandled constraint violation
+would all show up here.
+
+### One bug this found
+
+The first run of the equipment case returned **500 on all 200 requests**:
+`malformed array literal`. Drizzle expands a JS array inside a `sql` template
+into one placeholder per element, so `ANY($1::uuid[])` received a bare UUID
+rather than an array. The fix builds the Postgres array literal explicitly and
+binds it as a single parameter (`equipment-availability.ts`, `uuidArray`).
+
+Worth recording because of how it would have read without the transcript: every
+equipment hold failing looks, from the outside, like the admission check
+rejecting everything — a plausible INV-2 story — when the actual fault was in
+how one parameter was bound. The `5xx responses` assertion is what separated
+the two.

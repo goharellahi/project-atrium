@@ -2,7 +2,7 @@
   "name": "project-atrium",
   "version": "0.0.0",
   "private": true,
-  "description": "Atrium — studio booking platform. Rooms as interval exclusion, equipment as concurrent-usage capacity.",
+  "description": "Atrium \u2014 studio booking platform. Rooms as interval exclusion, equipment as concurrent-usage capacity.",
   "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=26"
@@ -12,7 +12,9 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "up": "docker compose up --build",
-    "down": "docker compose down -v"
+    "down": "docker compose down -v",
+    "proof": "pnpm --filter @atrium/tests-concurrency proof",
+    "seed": "pnpm --filter @atrium/api db:seed"
   },
   "devDependencies": {
     "typescript": "6.0.3"
