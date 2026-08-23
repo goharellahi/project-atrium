@@ -19,6 +19,17 @@ export class CorrelationMiddleware implements NestMiddleware {
 
     res.setHeader('x-request-id', correlationId);
 
+    // Which replica served this request.
+    //
+    // The concurrency proof needs to show that 200 requests really were spread
+    // across three replicas — a proof served entirely by one process proves
+    // nothing about a strategy whose whole claim is that it survives N of them.
+    // nginx's own `X-Upstream` header carries an IP, which changes on every
+    // `compose up`; this carries the name the compose file assigns, so the
+    // assertion reads as `api1/api2/api3` rather than as three addresses that
+    // have to be mapped back by hand.
+    res.setHeader('x-replica-id', process.env.REPLICA_ID ?? 'unknown');
+
     runWithContext({ correlationId, principal: null }, () => next());
   }
 }
