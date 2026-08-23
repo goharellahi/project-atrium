@@ -152,9 +152,20 @@ describe('cancellation policy is scoped to the token venue', () => {
     expect(before.status).toBe(200);
 
     // A `venue_id` in the body is the attack. It must be ignored, not honoured.
+    //
+    // The ladder is complete and bottoms out at zero. An earlier version of this
+    // test sent a single 72-hour tier and got a 422 — correctly, because
+    // TiersSchema refuses a ladder a cancellation could fall off the end of. It
+    // also meant the request was rejected before the `venue_id` could do
+    // anything, so the test was passing its own validation check while proving
+    // nothing at all about tenant scoping.
     const written = await call('PUT', '/venues/cancellation-policy', world.a.admin, {
       venue_id: world.b.venueId,
-      tiers: [{ min_hours_before: 72, room_refund_pct: 100, equipment_refund_pct: 100 }],
+      tiers: [
+        { min_hours_before: 72, room_refund_pct: 100, equipment_refund_pct: 100 },
+        { min_hours_before: 24, room_refund_pct: 40, equipment_refund_pct: 90 },
+        { min_hours_before: 0, room_refund_pct: 0, equipment_refund_pct: 0 },
+      ],
     });
     expect([200, 201]).toContain(written.status);
 
