@@ -19,6 +19,13 @@ const ReconciliationQuerySchema = z.object({
   from: z.coerce.date(),
   to: z.coerce.date(),
   grace_seconds: z.coerce.number().int().min(0).max(86_400).default(60),
+  /**
+   * How many discrepancy rows to return. `discrepancy_count` is always the
+   * TRUE total regardless of this, and `truncated` says whether the list was
+   * cut — a report that silently returns the first N and calls it the count is
+   * worse than no report.
+   */
+  limit: z.coerce.number().int().min(1).max(5_000).default(500),
 });
 
 @Controller('admin')
@@ -40,6 +47,6 @@ export class ReconciliationController {
     @Query(zodBody(ReconciliationQuerySchema))
     query: z.infer<typeof ReconciliationQuerySchema>,
   ) {
-    return this.reconciliation.run(query.from, query.to, query.grace_seconds);
+    return this.reconciliation.run(query.from, query.to, query.grace_seconds, query.limit);
   }
 }
