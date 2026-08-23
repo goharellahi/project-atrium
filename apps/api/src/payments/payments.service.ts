@@ -853,9 +853,26 @@ export class PaymentsService {
       .limit(1);
 
     if (!platform) {
-      // Migration 0003 seeds this. Its absence is a broken deployment, not a
-      // business case to guess a default for.
-      throw new Error('No platform default cancellation policy exists');
+      /**
+       * Migration 0003 inserts this row and the seed restores it after its
+       * truncate. Its absence is a broken deployment, not a business case to
+       * guess a default for — refunding nothing and refunding everything are
+       * both defensible here and both wrong to choose silently.
+       *
+       * 503, not 500. A 500 says the server was surprised; this is a known,
+       * named, fixable state and the response says exactly how to fix it. In
+       * P4 this threw a bare Error, which meant a freshly seeded database
+       * answered `GET /venues/cancellation-policy` with an opaque 500 and — far
+       * worse — every `charge.succeeded` threw inside the worker transaction,
+       * so no booking could reach CONFIRMED at all. Found in P5 by running it.
+       */
+      throw new ServiceUnavailableException({
+        statusCode: 503,
+        error: 'Service Unavailable',
+        message:
+          'No platform default cancellation policy exists. Migration 0003 inserts it; re-run migrations or re-seed. Bookings cannot be confirmed until it is present.',
+        remedy: 'node dist/db/migrate.js, or pnpm seed',
+      });
     }
 
     return { tiers: TiersSchema.parse(platform.tiers), policyId: platform.id, from: 'platform' };
