@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import type { Db } from '../db/client';
 import { users, type User, type UserRole } from '../db/schema';
 import { log } from '../common/logger';
+import { isUniqueViolation } from '../common/pg-errors';
 import type { LoginInput, RegisterInput } from './auth.schemas';
 
 /**
@@ -53,13 +54,10 @@ export class AuthService {
       log().info({ userId: created.id }, 'user registered');
       return this.issue(created);
     } catch (err: unknown) {
-      // 23505 = unique_violation on users.email.
-      if (
-        typeof err === 'object' &&
-        err !== null &&
-        'code' in err &&
-        (err as { code: unknown }).code === '23505'
-      ) {
+      // Drizzle nests the pg error under `cause`, so this must walk the chain —
+      // see common/pg-errors.ts. Checking err.code directly never matches and
+      // the 23505 escapes as a 500.
+      if (isUniqueViolation(err, 'users_email_unique')) {
         throw new ConflictException('Email already registered');
       }
       throw err;
