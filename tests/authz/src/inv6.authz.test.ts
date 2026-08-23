@@ -195,6 +195,36 @@ describe('reports', () => {
     const allowed = await call('GET', `/admin/reconciliation?${range}`, world.platformAdmin);
     expect(allowed.status).toBe(200);
   });
+
+  it('GET /venues/reports/revenue reports the token venue, and a venue_id in the query changes nothing', async () => {
+    recordProbe('GET /venues/reports/revenue');
+    const range = 'from=2020-01-01T00:00:00.000Z&to=2100-01-01T00:00:00.000Z';
+
+    const mine = await call('GET', `/venues/reports/revenue?${range}`, world.a.admin);
+    expect(mine.status).toBe(200);
+    expect((mine.json as { venue_id: string }).venue_id).toBe(world.a.venueId);
+    // The report names rooms, so B's room id is exactly the kind of thing that
+    // would leak if the scope came from anywhere but the token.
+    assertNoLeak(mine, secretsOf(world.b));
+
+    // There is no `venue_id` parameter on this route. Sending one anyway is the
+    // attack, and the only acceptable outcomes are "ignored" or "rejected" —
+    // never "honoured". Asserting the venue is still A's covers both.
+    const tampered = await call(
+      'GET',
+      `/venues/reports/revenue?${range}&venue_id=${world.b.venueId}`,
+      world.a.admin,
+    );
+    expect(tampered.status).toBe(200);
+    expect((tampered.json as { venue_id: string }).venue_id).toBe(world.a.venueId);
+    assertNoLeak(tampered, secretsOf(world.b));
+
+    // The documented mirror of reconciliation: a PLATFORM_ADMIN has no venue in
+    // their token, so this route refuses them rather than inventing one or
+    // silently widening to the whole platform. See ReportsController.
+    const platform = await call('GET', `/venues/reports/revenue?${range}`, world.platformAdmin);
+    expect([403, 404]).toContain(platform.status);
+  });
 });
 
 // ---------------------------------------------------------------------------
