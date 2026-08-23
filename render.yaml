@@ -19,6 +19,7 @@
 #   - the service sleeps after 15 minutes idle; first request takes 30-60s
 #   - 512 MB RAM / 0.1 CPU, which is why argon2 is tuned to 19 MiB per hash
 #   - Render free Postgres expires after 30 days
+#   - no pre-deploy hooks, no shell access: migrations run in the start command
 # ---------------------------------------------------------------------------
 databases:
   - name: atrium-db
@@ -36,10 +37,24 @@ services:
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    # Migrations run on deploy, before the new instance takes traffic. With one
-    # instance there is no race; if this ever scales past one, move it back to
-    # a one-shot job as in docker-compose.
-    preDeployCommand: node dist/db/migrate.js
+    # Migrations run as part of the container command, NOT via preDeployCommand.
+    #
+    # preDeployCommand is a paid-tier feature; a free service is rejected at
+    # blueprint validation with "pre-deploy command is not supported for free
+    # tier services". Chaining into the start command is the free-tier
+    # equivalent and has the same ordering guarantee: the server never binds
+    # until migrations have succeeded, and a failed migration exits non-zero so
+    # the deploy fails instead of serving against a stale schema.
+    #
+    # Safe here only because this service runs a single instance. Three replicas
+    # each running this on boot would race; that is why docker-compose keeps the
+    # separate one-shot `migrate` service instead. If numInstances ever rises
+    # above 1, this must move back to a pre-deploy step or a one-shot job.
+    #
+    # Note this also re-runs on every cold start after the free tier sleeps.
+    # Applied migrations are recorded in drizzle's journal, so the re-run is two
+    # queries and a no-op — it adds a little to the 30-60s wake time, nothing more.
+    dockerCommand: sh -c "node dist/db/migrate.js && node dist/main.js"
     envVars:
       - key: NODE_ENV
         value: production
