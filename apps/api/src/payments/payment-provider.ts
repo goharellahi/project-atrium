@@ -65,9 +65,33 @@ export interface RefundAccepted {
   status: 'ACCEPTED';
 }
 
+/** What the provider currently believes about a refund it accepted. */
+export interface RefundState {
+  refundId: string;
+  chargeId: string;
+  amountMinor: bigint;
+  status: 'processing' | 'succeeded';
+}
+
 export interface PaymentProvider {
   charge(request: ChargeRequest): Promise<ChargeAccepted>;
   refund(request: RefundRequest): Promise<RefundAccepted>;
+
+  /**
+   * Ask the provider what actually happened to a refund.
+   *
+   * Added in P5 because the webhook channel can lose a message permanently.
+   * Paygate corrupts 2% of delivery signatures and never retries a delivery, so
+   * roughly one refund in fifty settles at the provider and is never reported
+   * to us. The soak found six of them: `refund_id` present, money genuinely
+   * returned, `payments.status` still SUCCEEDED because the settlement webhook
+   * never arrived.
+   *
+   * An at-least-once channel that is actually at-most-once for 2% of messages
+   * cannot be the only source of truth about money. This is the pull to that
+   * push — the system asks rather than waiting forever to be told.
+   */
+  getRefund(refundId: string): Promise<RefundState | null>;
 }
 
 /** Injection token. P3 binds the real Paygate client to it. */
@@ -86,6 +110,12 @@ export class UnimplementedPaymentProvider implements PaymentProvider {
   }
 
   refund(): Promise<RefundAccepted> {
+    return Promise.reject(
+      new Error('Payment provider is not wired up until P3 (feat/p3-payments-paygate)'),
+    );
+  }
+
+  getRefund(): Promise<RefundState | null> {
     return Promise.reject(
       new Error('Payment provider is not wired up until P3 (feat/p3-payments-paygate)'),
     );

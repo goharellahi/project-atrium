@@ -46,6 +46,21 @@ const EnvSchema = z.object({
    */
   HOLD_SWEEPER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(30),
 
+  /**
+   * How many times a transaction aborted by Postgres with a class-40 error
+   * (deadlock, serialization failure) is re-run before the caller is told the
+   * slot is contended.
+   *
+   * 1 means "do not retry". This is an env var and not a constant because the
+   * right value is a measured trade-off, not a design opinion — see
+   * ARCHITECTURE.md Appendix B for the runs that chose it. Too low and a
+   * routine deadlock becomes a failed booking; too high and every retry holds a
+   * pool connection through another contended transaction, which under a
+   * 200-way pile-up on one slot exhausts the pool and turns a handful of
+   * deadlocks into a hundred connection timeouts.
+   */
+  TRANSIENT_RETRY_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(3),
+
   PAYGATE_BASE_URL: z.string().url().optional(),
   PAYGATE_SECRET: z.string().optional(),
 
@@ -60,14 +75,25 @@ const EnvSchema = z.object({
   PAYGATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8_000),
 
   /**
-   * How often each replica attempts to drain unapplied webhook deliveries.
+   * How often each replica drains unapplied webhook deliveries.
    *
-   * Like the hold sweeper, all three attempt it and a Postgres advisory lock
-   * elects one per tick. Short, because the backlog it drains includes the
-   * race-on-response case where a delivery arrived a few milliseconds before
-   * the payments row it belongs to.
+   * All three drain; there is no election, and WebhookProcessor.tick explains
+   * why the one P4 had was doing nothing. Short, because the backlog includes
+   * the race-on-response case where a delivery arrived a few milliseconds
+   * before the payments row it belongs to.
    */
   WEBHOOK_DRAIN_INTERVAL_SECONDS: z.coerce.number().int().positive().default(10),
+
+  /**
+   * How long a refund may sit accepted-but-unsettled before the API stops
+   * waiting for a webhook and asks the provider directly.
+   *
+   * Comfortably longer than Paygate's ordinary delivery latency and its 30%
+   * duplicate gap, so this never races a webhook that is simply on its way. It
+   * exists for the deliveries that will never arrive at all — the 2% whose
+   * signature was corrupted, which are correctly rejected and never resent.
+   */
+  REFUND_POLL_AFTER_SECONDS: z.coerce.number().int().positive().default(45),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

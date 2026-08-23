@@ -29,7 +29,49 @@ export class HealthController {
   @Get()
   @HealthCheck()
   check() {
-    return this.health.check([() => this.checkDatabase()]);
+    return this.health.check([() => this.checkDatabase(), () => this.checkPolicy()]);
+  }
+
+  /**
+   * Is the platform default cancellation policy present?
+   *
+   * Reported as a DETAIL of an otherwise-up indicator rather than as a failure,
+   * and the choice is deliberate. Without that row no booking can be confirmed,
+   * so failing the check is tempting — but nginx would then pull all three
+   * replicas and the whole API would answer 502, including `/auth/login` and
+   * the reconciliation report an operator needs to diagnose it. A self-inflicted
+   * outage makes the problem harder to see, not easier.
+   *
+   * So it surfaces in three places instead: here, in the boot log, and as an
+   * explicit 503 naming the remedy on the two paths that actually need it.
+   *
+   * P4 shipped with none of those and the row silently absent on every seeded
+   * database. This exists because of that.
+   */
+  private async checkPolicy() {
+    const check = this.indicator.check('cancellation_policy');
+
+    try {
+      const result = await this.pool.query(
+        'SELECT 1 FROM cancellation_policies WHERE venue_id IS NULL LIMIT 1',
+      );
+      const present = result.rowCount === 1;
+
+      return check.up({
+        platform_default_present: present,
+        ...(present
+          ? {}
+          : {
+              warning:
+                'MISSING — bookings cannot be confirmed. Migration 0003 inserts it; re-run migrations or re-seed.',
+            }),
+      });
+    } catch (err: unknown) {
+      return check.up({
+        platform_default_present: null,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   private async checkDatabase() {

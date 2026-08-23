@@ -7,6 +7,7 @@ import type {
   PaymentProvider,
   RefundAccepted,
   RefundRequest,
+  RefundState,
 } from './payment-provider';
 
 /**
@@ -71,6 +72,42 @@ export class PaygateClient implements PaymentProvider {
     );
 
     return { refundId: body.refund_id, status: 'ACCEPTED' };
+  }
+
+  /**
+   * Read a refund's current state. Returns null if Paygate has never heard of
+   * it, which is itself an answer worth having.
+   */
+  async getRefund(refundId: string): Promise<RefundState | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      const response = await fetch(`${this.baseUrl}/paygate/refunds/${refundId}`, {
+        signal: controller.signal,
+      });
+
+      if (response.status === 404) return null;
+      if (!response.ok) {
+        throw new BadGatewayException(`paygate refund lookup failed ${response.status}`);
+      }
+
+      const body = (await response.json()) as {
+        id: string;
+        charge_id: string;
+        amount_minor: number;
+        status: 'processing' | 'succeeded';
+      };
+
+      return {
+        refundId: body.id,
+        chargeId: body.charge_id,
+        amountMinor: BigInt(body.amount_minor),
+        status: body.status,
+      };
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async post<T>(

@@ -34,9 +34,9 @@ push, never open a PR, never merge, never touch a remote.
   | --- | --- |
   | P1 | `feat/p1-schema-auth` |
   | P2 | `feat/p2-booking-core` |
-  | P3 | `feat/p3-payments-paygate` |
-  | P4 | `feat/p4-concurrency-proof` |
-  | P5 | `feat/p5-tests-observability` |
+  | P3 | `feat/p3-paygate` — provider only; the API half landed in P4 |
+  | P4 | `feat/p4-payments-integrity` — was `p4-concurrency-proof`; the proof shipped in P2 |
+  | P5 | `feat/p5-verify-e2e` — was `p5-tests-observability`; its unit tests shipped in P4 |
   | P6 | `feat/p6-frontend` |
   | P7 | `feat/p7-performance` |
   | P8 | `docs/p8-final` |
@@ -249,17 +249,20 @@ never be committed. Do not quote the brief at length in committed files.
 
 ## Current phase
 
-**P4 — API payment integrity and the required negative test. Code complete on
-`feat/p4-payments-integrity`, NOT yet run against a live stack.** Pay, webhook
-ingest over the raw body, the delivery worker (INV-3, INV-4), cancellation
-policy as data, reconciliation (INV-5), and the `tests/authz` INV-6 suite with
-its route census.
+**P5 — verified against the running stack, on `feat/p5-verify-e2e`.** All six
+invariants are now demonstrated rather than designed for: 69 offline tests, 24
+INV-6 assertions, the 200-request proof (plus eight consecutive re-runs), 20
+payment-integrity assertions, and a three-minute chaos soak reconciling to zero.
+Transcripts in `ARCHITECTURE.md` Appendices B–D.
 
-Next, in order: **bring the stack up and verify P4** — typecheck, build and 29
-offline unit tests pass, but the payment path, the INV-6 probes and the DI graph
-after the `StateMachineModule` extraction have not been exercised. Then **P5 —
-the end-to-end happy path** through Paygate's `/_test/deliver` and `/_test/delay`,
-which is what turns INV-3 and INV-4 from designed-for into demonstrated.
+P5 found seven defects, six in code P4 called complete — including one that made
+the entire payment path inert. Read the P5 entry in `PLAN.md` before trusting
+anything that has not been run.
+
+Next: **P6 — the frontend**, per `DESIGN.md`. Outstanding smaller items are
+listed under P5 in `PLAN.md`: CI runs only the offline tests, nothing asserts
+the correlation id survives into the webhook path, and the proof has not been
+run against the `full` profile.
 
 See `PLAN.md` for the full phase list and the progress log.
 

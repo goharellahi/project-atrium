@@ -115,7 +115,17 @@ async function makePrincipal(
   role: string,
   venueId: string | null,
 ): Promise<Principal> {
-  const email = `${FIXTURE_TAG}-${label}-${randomUUID()}@atrium.test`;
+  // Lowercased here, and it is not cosmetic.
+  //
+  // `POST /auth/register` normalises the address before storing it, so a
+  // fixture label like `adminA` produces a row spelled `admina` and the
+  // promotion below — `WHERE email = $3` — matches ZERO rows. Postgres reports
+  // that as a perfectly successful UPDATE, the principal stays a CUSTOMER, and
+  // the whole suite then passes for the wrong reason: every cross-venue probe
+  // is denied because the caller is a customer with no venue at all, not
+  // because tenant isolation works. Found by running it; the role assertion at
+  // the end of this function is what caught it.
+  const email = `${FIXTURE_TAG}-${label}-${randomUUID()}@atrium.test`.toLowerCase();
 
   const registered = await fetch(`${BASE_URL}/auth/register`, {
     method: 'POST',
@@ -129,10 +139,18 @@ async function makePrincipal(
   }
 
   if (role !== 'CUSTOMER') {
-    await db.query(
+    const promoted = await db.query(
       `UPDATE users SET role = $1::user_role, venue_id = $2::uuid WHERE email = $3`,
       [role, venueId, email],
     );
+    // An UPDATE that matches nothing is a successful UPDATE as far as Postgres
+    // is concerned. Checked here so the failure names its own cause instead of
+    // surfacing three lines later as a confusing role mismatch.
+    if (promoted.rowCount !== 1) {
+      throw new Error(
+        `fixture: promoting ${label} to ${role} matched ${promoted.rowCount} rows, expected 1 (email ${email})`,
+      );
+    }
   }
 
   const loggedIn = await fetch(`${BASE_URL}/auth/login`, {

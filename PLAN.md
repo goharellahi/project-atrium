@@ -150,11 +150,10 @@ integrity work lands separately once the booking core exists.
 - [x] Refund calculator unit tests, every tier boundary *(pulled from P5)*
 - [x] State machine transition table tests *(cut from P2, pulled from P5)*
 - [x] `docker-compose.yml`: `PAYGATE_CALLBACK_URL` and a pinned `PAYGATE_SEED`
-- [ ] **Nothing in this phase has been run against a live stack.** Typecheck,
-      build and the 29 offline unit tests pass; the payment path, the INV-6
-      probes and the DI graph are unverified. First action of the next session.
-- [ ] One end-to-end happy path driven through `/paygate/_test/deliver` and
-      `/_test/delay` — cut for time, moves to P5
+- [x] **Verified in P5.** Everything above was run against three replicas. Six
+      defects were found, five of them in P4's own code — see the P5 log.
+- [x] One end-to-end happy path driven through `/paygate/_test/deliver` and
+      `/_test/delay` — delivered in P5
 
 ---
 
@@ -177,16 +176,30 @@ integrity work lands separately once the booking core exists.
 
 ---
 
-## P5 — Tests and observability · `feat/p5-tests-observability`
+## P5 — Bring it up and verify everything · `feat/p5-verify-e2e`
 
+> **Re-scoped.** P5 was "tests and observability"; the unit tests it held were
+> pulled forward into P4, so P5 became the phase that runs the stack and finds
+> out whether any of it was true. It was not.
+
+- [x] `docker compose up --build` — 7 services healthy, DI graph resolves, all
+      13 routes mapped, three replicas serving
+- [x] `pnpm test` — 69 offline tests (29 api, 39 paygate, 1 route census)
+- [x] `pnpm authz` — 24 INV-6 assertions against the load balancer
+- [x] `pnpm proof` — the 200-request proof, and eight consecutive re-runs
+- [x] `pnpm e2e` — 20 payment-integrity assertions (INV-3, INV-4, INV-5,
+      bad signature, unknown charge)
+- [x] `pnpm soak` — 3 minutes of real traffic under chaos, then reconcile
+- [x] Every transcript pasted into `ARCHITECTURE.md`, Appendices B–D
 - [x] Unit tests over the state machine transition table *(cut from P2, done P4)*
-- [x] **INV-6 negative suite** in `tests/authz` *(cut from P2, done P4)*
 - [x] Unit tests over the refund calculator, every tier boundary *(done P4)*
 - [ ] Unit tests over the state machine's *runtime* edges — the row lock, one
-      audit row per transition, the 409 body. Needs a real Postgres.
-- [ ] One end-to-end happy path *(cut from P4)*
-- [ ] Correlation id surviving into the webhook path, proven by a test
-- [ ] CI green with the full suite
+      audit row per transition, the 409 body. Needs a real Postgres; the edges
+      are covered end to end by the proof and the e2e suite, not per-edge.
+- [ ] Correlation id surviving into the webhook path, proven by a test — the
+      plumbing is in and Paygate echoes `X-Request-Id`, but nothing asserts it
+- [ ] CI green with the full suite — CI runs the 69 offline tests only; the
+      other 49 need a compose stack CI does not stand up
 
 ---
 
@@ -213,8 +226,9 @@ integrity work lands separately once the booking core exists.
 
 ## P8 — Final documents · `docs/p8-final`
 
-- [~] `DECISIONS.md` — 8 entries written in P4 as the decisions were made; the
-      P0–P2 ones still live in `ARCHITECTURE.md` §3 and §7 and fold in here
+- [~] `DECISIONS.md` — 11 entries written in P4 and P5 as the decisions were
+      made; the P0–P2 ones still live in `ARCHITECTURE.md` §3 and §7 and fold in
+      here during P8
 - [ ] `AI_LOG.md` — what was delegated, where the agent was wrong or naive
 - [ ] `TIMELINE.md` — hour by hour, what was cut, why
 - [ ] `ARCHITECTURE.md` stubs completed: ERD, state machine, payment integrity,
@@ -231,7 +245,8 @@ integrity work lands separately once the booking core exists.
 - [~] Deployed frontend URL — https://project-atrium.vercel.app — live; the
       console itself is P6
 - [x] `README.md` (stub with Known Issues; final pass in P8)
-- [ ] `ARCHITECTURE.md` — all required sections
+- [~] `ARCHITECTURE.md` — §3 and §4 complete with verification transcripts;
+      §1, §2, §5, §6, §8, §9 still stubs for P8
 - [~] `DECISIONS.md` — started in P4, completed in P8
 - [ ] `AI_LOG.md`
 - [ ] `TIMELINE.md`
@@ -239,8 +254,10 @@ integrity work lands separately once the booking core exists.
 - [x] `CLAUDE.md`
 - [x] `PLAN.md`
 - [x] `DESIGN.md`
-- [ ] Tests: concurrency proof, cross-venue authz, state machine units, refund
-      calculator units, one end-to-end happy path
+- [x] Tests: concurrency proof, cross-venue authz, state machine units, refund
+      calculator units, one end-to-end happy path — all delivered and all run
+      against three replicas in P5 (118 assertions; transcripts in
+      `ARCHITECTURE.md` Appendices B–D)
 - [ ] Walkthrough recording
 
 ### Explicit non-goals
@@ -530,3 +547,114 @@ Also fixed, since this phase owned the file: `docker-compose.yml` set
 no `PAYGATE_SEED` — so the stack ran on Paygate's default and no chaos branch
 was reproducible, which is precisely what the per-decision seeding in P3 was
 built to provide.
+
+### 2026-08-23 — P5: brought the stack up and found out
+
+P4 was code complete and had never run. This phase ran it. **Seven defects, six
+of them in code P4 called done**, and one of them meant the entire payment path
+had never worked at all.
+
+Report of what broke, since the diff shows what works.
+
+**1. The whole payment path was inert.** `webhook_deliveries.raw_body` was
+`jsonb` and the handler wrote the raw body string into it. Drizzle hands a
+string to the driver as a jsonb literal and parses jsonb back on read, so the
+column returned an object and `JSON.parse(String(object))` threw
+`"[object Object]" is not valid JSON` on **every** delivery. Nothing was ever
+confirmed, no refund was ever issued, and three replicas retried the same six
+rows every ten seconds forever. INV-3, INV-4 and the money half of INV-5 were
+arguments in comments, nothing more. The column is `text` now — which it should
+always have been, since it holds the exact bytes an HMAC covers and jsonb
+normalises precisely what a signature is computed over. The P4 comment above it
+said so and then chose jsonb anyway.
+
+**2. The seed deleted the platform cancellation policy.** `truncate()` empties
+`cancellation_policies`, which contains the default row migration 0003 inserts —
+and a migration runs once. So on every rebuilt-and-seeded database the row was
+gone, and since the policy snapshot is resolved at confirmation, no booking
+could reach CONFIRMED at all. The class of bug is the thing to keep: data the
+application cannot run without was owned by a migration, while a different file
+was free to delete it.
+
+**3. The concurrency proof fails when you run it five times.** It passed in P2
+and passes here — once. Run it repeatedly and it collapses: 227 deadlocks logged
+by Postgres, 59 5xx on the fifth run. The invariants held throughout; what broke
+was the claim that a rejected hold is always a clean 409. Postgres detects a
+deadlock only after `deadlock_timeout` — a full second — and a second of lock
+wait per deadlock across a 20-connection pool is what produced the connection
+timeouts and nginx 504s.
+
+The first fix made it worse. Retrying the transaction with a 10–30 ms backoff
+took a run from 1 stray 500 to 170 5xx, because a retrying request holds its
+pool connection through another contended transaction. **A retry has to be
+shorter than the transaction it is retrying or it becomes the load.** The
+working fix is a transaction-scoped advisory lock on the room, taken before the
+insert: it is a queueing discipline, not a correctness mechanism —
+`no_room_overlap` still decides every admission — and it replaces a free-for-all
+with a total order so no cycle can form. Eight consecutive runs afterwards,
+3,200 requests, zero deadlocks, zero 5xx. Numbers in ARCHITECTURE.md
+Appendix B.
+
+**4. The audit trail could not be ordered.** `audit_events.occurred_at`
+defaulted to `now()`, which is the transaction start time and identical for
+every row one transaction writes. INV-4's expiry and its refund come from a
+single worker transaction, so ordering fell through to a random UUID and
+reported the refund before the expiry about half the time. `clock_timestamp()`
+now. Only found because the e2e test asserts on the order rather than on the
+presence of the rows — a test that checked both exist would still pass today.
+
+**5. Reconciliation under-reported itself.** `discrepancy_count` was
+`rows.length` after a bare `LIMIT 500`, so a database with 5,049 discrepancies
+reported exactly 500. `totals.confirmed_bookings` was counted through a join on
+`payments`, so a database with 5,049 confirmed bookings and no payments reported
+`0` — the exact number an operator would read as evidence nothing was wrong. In
+a report whose only job is to be trustworthy.
+
+**6. The webhook drainer's leader election did nothing.** The advisory lock was
+transaction-scoped around a SELECT, so it was released within a millisecond and
+all three replicas simply won it in turn and processed the identical batch. The
+logs show the same six delivery ids failing on api1, api2 and api3 within 20 ms.
+Removed rather than fixed: the guard that actually matters is the per-row
+`FOR UPDATE` plus the `processed_at` check one layer down, and a comment
+claiming a guarantee the code never provided is worse than no comment.
+
+**7. Found by the soak, and only by the soak.** Three minutes of real traffic
+under chaos, then reconcile: twelve discrepancies. Six refunds where the money
+had genuinely gone back — Paygate issued every one and returned a refund id —
+but the `refund.succeeded` webhook never arrived, because 2% of deliveries have
+their signature corrupted and Paygate never retries a delivery. The API
+correctly answered 401 and the settlement was lost for good.
+
+An at-least-once channel that is at-most-once for 2% of messages cannot be the
+only source of truth about money, so the drainer now **asks**: any refund the
+provider accepted and never reported on is looked up directly and applied
+through the same `payment_events` gate a webhook would use. It deliberately does
+not mark a payment REFUNDED merely because a refund id exists — accepted is not
+settled. Re-run: 2,157 holds, 1,547 payments, 625 duplicate deliveries absorbed,
+62 corrupt signatures rejected, zero unexpected 5xx, **zero discrepancies**.
+
+**Two of the tests were also passing for the wrong reason,** which is worth as
+much as the product bugs. The INV-6 fixture registered users with mixed-case
+labels and the API lowercases addresses, so the SQL promotion matched zero rows
+and every principal stayed a CUSTOMER — every cross-venue probe was denied
+because the caller had no venue at all. And the policy probe sent an incomplete
+tier ladder, got a correct 422, and never reached the scoping logic it was
+meant to be testing. Both now assert loudly at the point of failure.
+
+**Also fixed in passing:** `nest build` was compiling `*.test.ts` into `dist/`,
+so test code shipped in the production image and a build-then-test run found two
+copies of every suite. And a hand-authored migration journal entry with a `when`
+lower than an existing generated one is silently skipped by drizzle — 0005 did
+not apply for two builds while `migrations applied` printed happily. Both
+recorded in `apps/api/src/db/migrations/README.md`.
+
+**Where the totals stand:** 69 offline tests, 24 INV-6 assertions, 5 concurrency
+proof assertions, 20 payment-integrity assertions, 4 soak assertions. All
+passing against three replicas behind nginx.
+
+**Still not done, and not hidden:** CI runs only the 69 offline tests, because
+the other 49 need a compose stack it does not stand up. Nothing asserts that the
+correlation id survives into the webhook path, though the plumbing is there and
+Paygate echoes `X-Request-Id`. The per-edge state machine unit suite is still
+covered end to end rather than edge by edge. The proof has still only been run
+against the `demo` profile, not `full`.

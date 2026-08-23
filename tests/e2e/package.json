@@ -1,0 +1,22 @@
+{
+  "name": "@atrium/tests-e2e",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "End-to-end payment integrity: INV-3, INV-4, INV-5 against the live stack.",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "e2e": "vitest run --config vitest.e2e.config.ts --reporter=verbose",
+    "soak": "vitest run --config vitest.soak.config.ts --reporter=verbose",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "@types/pg": "8.15.6",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

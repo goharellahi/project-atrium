@@ -177,6 +177,8 @@ interface SeedSummary {
   rooms: number;
   equipmentTypes: number;
   users: number;
+  policies: number;
+  payments: number;
   bookings: number;
   lineItems: number;
   emptyWindow: { room_id: string; room_name: string; starts_at: string; ends_at: string } | null;
@@ -236,6 +238,15 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
     parallelism: 1,
   });
 
+  // Immediately after the truncate, and before anything can need it.
+  //
+  // `truncate()` empties `cancellation_policies`, which includes the platform
+  // default that migration 0003 inserted — and a migration runs once, so a
+  // rebuilt database never gets it back. Restoring it here is not tidiness:
+  // without that row every confirmation throws while resolving its policy
+  // snapshot, so no booking can reach CONFIRMED at all. See the P5 log.
+  const policies = await seedCancellationPolicies(client);
+
   const venues = await seedVenues(client, profile, rng);
   const rooms = await seedRooms(client, profile, venues, rng);
   const equipment = await seedEquipment(client, profile, venues, rng);
@@ -251,6 +262,9 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
     rng,
   );
 
+  // Every settled booking gets the payment it implies. See seedPayments.
+  const payments = await seedPayments(client);
+
   await client.query('ANALYZE');
 
   return {
@@ -259,6 +273,8 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
     rooms: rooms.length,
     equipmentTypes: equipment.length,
     users: users.customers.length + users.staff.length + 1,
+    policies,
+    payments,
     bookings,
     lineItems,
     emptyWindow,
@@ -285,6 +301,107 @@ async function truncate(client: PoolClient): Promise<void> {
       users, equipment_types, rooms, venues
     RESTART IDENTITY CASCADE
   `);
+}
+
+/**
+ * Put back the platform default cancellation policy that `truncate` removed.
+ *
+ * Migration `0003` inserts this row, and a migration runs exactly once. The
+ * seed then truncates the table, so on any rebuilt-and-seeded database the row
+ * was simply gone — and because the application resolves a booking's policy
+ * snapshot at the moment of confirmation, its absence meant every
+ * `charge.succeeded` threw and no booking could reach CONFIRMED. The endpoint
+ * that reads the policy returned 500 for the same reason.
+ *
+ * That is the whole bug, and it is worth stating what class it belongs to:
+ * data the application cannot run without was owned by a migration, while a
+ * different file was free to delete it. Restoring it here makes the seed
+ * responsible for the contents of every table it empties.
+ *
+ * The tiers are duplicated from `0003` rather than imported from it, because
+ * a migration is a historical artefact — editing it to share a constant with
+ * runtime code would mean changing a migration that has already run.
+ */
+async function seedCancellationPolicies(client: PoolClient): Promise<number> {
+  await client.query(`
+    INSERT INTO cancellation_policies (venue_id, tiers)
+    VALUES (NULL, '[
+      { "min_hours_before": 48, "room_refund_pct": 100, "equipment_refund_pct": 100 },
+      { "min_hours_before": 24, "room_refund_pct": 50,  "equipment_refund_pct": 100 },
+      { "min_hours_before": 2,  "room_refund_pct": 0,   "equipment_refund_pct": 100 },
+      { "min_hours_before": 0,  "room_refund_pct": 0,   "equipment_refund_pct": 0 }
+    ]'::jsonb)
+  `);
+
+  return 1;
+}
+
+/**
+ * Give every settled booking the payment it implies.
+ *
+ * Without this the seed produces thousands of CONFIRMED and COMPLETED bookings
+ * with no captured charge behind them — and that is not a cosmetic gap, it is
+ * precisely the `confirmation_without_capture` discrepancy: a room given away
+ * for free. `GET /admin/reconciliation` reported it correctly, in the thousands,
+ * on a freshly seeded database, which meant INV-5's "zero discrepancies on
+ * clean data" could never be demonstrated.
+ *
+ * The reconciler was right and the seed was wrong. Fixed on the seed's side
+ * rather than by teaching the report to ignore seeded rows, which would have
+ * blinded it to the real failure it exists to catch.
+ *
+ * Rows are synthesised in SQL from the bookings that already exist:
+ *
+ *   - CONFIRMED / COMPLETED -> a SUCCEEDED payment for the full total, plus the
+ *     `charge.succeeded` event that a real capture would have written.
+ *   - REFUNDED              -> a REFUNDED payment with `refunded_minor` set,
+ *     plus both events, so `refund_without_capture` does not fire on them.
+ *   - CANCELLED / EXPIRED / HELD -> nothing. No money ever moved.
+ *
+ * Keys and ids follow the same derivation the live path uses (`charge:<booking>`),
+ * so a seeded booking is indistinguishable from one that went through Paygate
+ * and `POST /bookings/:id/pay` on it is idempotent for the same reason.
+ */
+async function seedPayments(client: PoolClient): Promise<number> {
+  const inserted = await client.query(`
+    INSERT INTO payments
+      (booking_id, idempotency_key, charge_id, amount_minor, status,
+       refund_id, refund_idempotency_key, refunded_minor, created_at, updated_at)
+    SELECT
+      b.id,
+      'charge:' || b.id::text,
+      'ch_seed_' || replace(b.id::text, '-', ''),
+      b.total_minor,
+      CASE WHEN b.status = 'REFUNDED' THEN 'REFUNDED' ELSE 'SUCCEEDED' END::payment_status,
+      CASE WHEN b.status = 'REFUNDED'
+           THEN 're_seed_' || replace(b.id::text, '-', '') END,
+      CASE WHEN b.status = 'REFUNDED'
+           THEN 'refund:ch_seed_' || replace(b.id::text, '-', '') END,
+      CASE WHEN b.status = 'REFUNDED' THEN b.total_minor ELSE 0 END,
+      b.created_at,
+      b.created_at
+      FROM bookings b
+     WHERE b.status IN ('CONFIRMED','COMPLETED','REFUNDED')
+  `);
+
+  // The idempotency ledger, so the seeded charges look exactly like applied
+  // ones. Without the capture event a seeded REFUNDED booking would be flagged
+  // as a refund against a charge that never captured.
+  await client.query(`
+    INSERT INTO payment_events (charge_id, event, occurred_at, applied_at)
+    SELECT p.charge_id, 'charge.succeeded', p.created_at, p.created_at
+      FROM payments p
+     WHERE p.charge_id IS NOT NULL
+  `);
+
+  await client.query(`
+    INSERT INTO payment_events (charge_id, event, occurred_at, applied_at)
+    SELECT p.charge_id, 'refund.succeeded', p.updated_at, p.updated_at
+      FROM payments p
+     WHERE p.status = 'REFUNDED' AND p.charge_id IS NOT NULL
+  `);
+
+  return inserted.rowCount ?? 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -953,7 +1070,8 @@ function report(s: SeedSummary): void {
   console.log(`seed complete — profile "${s.profile}" in ${s.elapsedSeconds}s`);
   console.log(
     `  ${s.venues} venues · ${s.rooms} rooms · ${s.equipmentTypes} equipment types · ` +
-      `${s.users} users · ${s.bookings} bookings · ${s.lineItems} line items`,
+      `${s.users} users · ${s.bookings} bookings · ${s.lineItems} line items · ` +
+      `${s.payments} payments · ${s.policies} platform policy`,
   );
   console.log('');
   console.log('TEST LOGINS  (password is the same for every seeded account)');

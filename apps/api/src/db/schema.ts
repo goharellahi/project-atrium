@@ -363,7 +363,24 @@ export const webhookDeliveries = pgTable('webhook_deliveries', {
   reference: text('reference'),
   event: text('event'),
   signatureValid: boolean('signature_valid').notNull(),
-  rawBody: jsonb('raw_body').notNull(),
+  /**
+   * The exact bytes that were signed. `text`, and it must never be `jsonb`.
+   *
+   * P4 declared this `jsonb` and wrote the raw body string into it. Drizzle
+   * hands a string straight to the driver as a jsonb literal, so Postgres
+   * parsed it, stored a normalised object, and returned an OBJECT on read —
+   * whereupon `JSON.parse(String(row.rawBody))` produced
+   * `"[object Object]" is not valid JSON` and EVERY delivery failed to apply.
+   * Nothing confirmed, nothing refunded, and three replicas retried the same
+   * six rows every ten seconds forever. Found in P5, on the first end-to-end
+   * run; it had never executed before.
+   *
+   * The type is also wrong on its own terms, independently of that bug. jsonb
+   * normalises key order, whitespace and number formatting — precisely the
+   * things an HMAC covers. Storing signed bytes in a column that reformats them
+   * destroys the only evidence that settles a signature dispute.
+   */
+  rawBody: text('raw_body').notNull(),
   receivedAt: timestamp('received_at', { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -395,9 +412,19 @@ export const auditEvents = pgTable('audit_events', {
   toState: bookingStatus('to_state'),
   reason: text('reason').notNull(),
   metadata: jsonb('metadata').notNull().default(sql`'{}'::jsonb`),
+  /**
+   * `clock_timestamp()`, NOT `now()`. Set by migration 0005.
+   *
+   * `now()` is the transaction start time and is identical for every statement
+   * in that transaction, so the several audit rows one transaction writes were
+   * indistinguishable in time and the trail could not be ordered. INV-4 needs
+   * "expired, then refunded" to be readable as a sequence, and both of those
+   * rows come from a single webhook-worker transaction. Ordering fell through
+   * to a random UUID and reported them backwards about half the time.
+   */
   occurredAt: timestamp('occurred_at', { withTimezone: true })
     .notNull()
-    .defaultNow(),
+    .default(sql`clock_timestamp()`),
 }, (t) => [
   index('audit_events_booking_idx').on(t.bookingId),
   index('audit_events_occurred_idx').on(t.occurredAt),

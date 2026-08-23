@@ -16,6 +16,10 @@ export const PG_EXCLUSION_VIOLATION = '23P01';
 export const PG_CHECK_VIOLATION = '23514';
 export const PG_FOREIGN_KEY_VIOLATION = '23503';
 
+/** Class 40 — transaction rollback. Transient by definition; safe to retry. */
+export const PG_SERIALIZATION_FAILURE = '40001';
+export const PG_DEADLOCK_DETECTED = '40P01';
+
 interface PgLikeError {
   code?: unknown;
   constraint?: unknown;
@@ -55,6 +59,31 @@ export function isUniqueViolation(err: unknown, constraint?: string): boolean {
  */
 export function isExclusionViolation(err: unknown): boolean {
   return pgErrorCode(err) === PG_EXCLUSION_VIOLATION;
+}
+
+/**
+ * A transient rollback — deadlock (40P01) or serialization failure (40001).
+ *
+ * This is NOT a rejection. Postgres has thrown the whole transaction away
+ * because it could not order it against a concurrent one, and the correct
+ * response is to run it again, not to tell the caller their booking failed.
+ *
+ * Found in P5, by running the 200-request proof rather than by reasoning about
+ * it. One request in 200 came back 500 with 40P01 and
+ * `while checking exclusion constraint on tuple ... in relation "bookings"`:
+ * two hold transactions each ended up waiting on the other's uncommitted
+ * speculative insertion, and Postgres broke the cycle by aborting one. INV-1
+ * itself held — exactly one booking existed afterwards — but a 500 where a 409
+ * belongs is its own fail condition (CLAUDE.md hard rule 3), and the P2 proof
+ * had simply never rolled that particular die.
+ *
+ * The distinction that matters: 23P01 means "this slot is taken" and is a final
+ * answer. 40P01 means "ask me again" and carries no information about whether
+ * the slot is taken at all.
+ */
+export function isTransientRollback(err: unknown): boolean {
+  const code = pgErrorCode(err);
+  return code === PG_DEADLOCK_DETECTED || code === PG_SERIALIZATION_FAILURE;
 }
 
 export function isCheckViolation(err: unknown, constraint?: string): boolean {

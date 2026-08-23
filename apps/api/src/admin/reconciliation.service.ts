@@ -39,8 +39,11 @@ export interface Discrepancy extends Record<string, unknown> {
  *   4. **refund_without_capture** — a refund recorded against a payment that
  *      never captured. Money leaving with nothing to have paid for it.
  *   5. **refund_initiated_not_settled** — a refund key was minted and the
- *      refund never came back. The customer is owed money the system believes
- *      it has returned.
+ *      provider returned no refund id. The customer is owed money the system
+ *      believes it has returned, with no evidence the provider was ever
+ *      reached. **refund_accepted_not_settled** is its milder sibling: the
+ *      provider accepted the refund and never reported settlement, which is
+ *      what a lost webhook looks like.
  *   6. **over_refunded** — more went back than came in.
  *   7. **unmatched_delivery** — a signed delivery still unapplied past the
  *      grace window, including the `unknown_charge` case. The provider says it
@@ -59,17 +62,89 @@ export class ReconciliationService {
     from: Date,
     to: Date,
     graceSeconds: number,
+    limit = 500,
   ): Promise<{
     from: string;
     to: string;
     grace_seconds: number;
     discrepancy_count: number;
+    returned: number;
+    truncated: boolean;
+    by_kind: Record<string, number>;
     discrepancies: Discrepancy[];
     totals: Record<string, string>;
   }> {
+    const union = this.discrepancies(from, to, graceSeconds);
+
+    // Two passes over the same fragment, deliberately.
+    //
+    // The first counts EVERY discrepancy and groups them by kind; the second
+    // returns at most `limit` rows to look at. P4 had one pass with a bare
+    // `LIMIT 500` and reported `result.rows.length` as the count — so a
+    // database with 5,000 discrepancies reported exactly 500, and a report
+    // whose entire job is to be trustworthy was quietly truncating its own
+    // headline number. An admin-only report can afford the second scan; it
+    // cannot afford to under-report.
+    const counts = await this.db.execute<{ kind: string; n: number }>(sql`
+      SELECT kind, COUNT(*)::int AS n FROM (${union}) counted GROUP BY kind
+    `);
+
+    const rows = await this.db.execute<Discrepancy>(sql`
+      SELECT kind, booking_id::text AS booking_id, charge_id, amount_minor, detail,
+             to_char(observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS observed_at
+        FROM (${union}) listed
+       ORDER BY observed_at DESC
+       LIMIT ${limit}
+    `);
+
+    const byKind: Record<string, number> = {};
+    let total = 0;
+    for (const row of counts.rows) {
+      byKind[row.kind] = row.n;
+      total += row.n;
+    }
+
+    const totals = await this.db.execute<{
+      captured_minor: string;
+      refunded_minor: string;
+      confirmed_bookings: string;
+      settled_payments: string;
+    }>(sql`
+      SELECT
+        (SELECT COALESCE(SUM(p.amount_minor) FILTER (WHERE p.status IN ('SUCCEEDED','REFUNDED')), 0)::text
+           FROM payments p WHERE p.created_at >= ${from} AND p.created_at < ${to}) AS captured_minor,
+        (SELECT COALESCE(SUM(p.refunded_minor), 0)::text
+           FROM payments p WHERE p.created_at >= ${from} AND p.created_at < ${to}) AS refunded_minor,
+        -- Counted from bookings, NOT from a join through payments. P4 counted
+        -- it through the join, so a database with 5,049 confirmed bookings and
+        -- no payments reported confirmed_bookings: 0 — the exact number an
+        -- operator would read as evidence that nothing was wrong.
+        (SELECT COUNT(*)::text FROM bookings b
+          WHERE b.status = 'CONFIRMED'
+            AND b.updated_at >= ${from} AND b.updated_at < ${to}) AS confirmed_bookings,
+        (SELECT COUNT(*)::text FROM payments p
+          WHERE p.status IN ('SUCCEEDED','REFUNDED')
+            AND p.created_at >= ${from} AND p.created_at < ${to}) AS settled_payments
+    `);
+
+    return {
+      from: from.toISOString(),
+      to: to.toISOString(),
+      grace_seconds: graceSeconds,
+      discrepancy_count: total,
+      returned: rows.rows.length,
+      truncated: total > rows.rows.length,
+      by_kind: byKind,
+      discrepancies: rows.rows,
+      totals: (totals.rows[0] ?? {}) as unknown as Record<string, string>,
+    };
+  }
+
+  /** The seven checks, as one composable fragment so it can be counted and listed. */
+  private discrepancies(from: Date, to: Date, graceSeconds: number) {
     const grace = sql.raw(`interval '${Math.max(0, Math.floor(graceSeconds))} seconds'`);
 
-    const result = await this.db.execute<Discrepancy>(sql`
+    return sql`
       WITH settled AS (
         SELECT p.*, b.status AS booking_status, b.venue_id
           FROM payments p
@@ -91,15 +166,20 @@ export class ReconciliationService {
            AND updated_at < now() - ${grace}
       ),
 
-      -- 2. CONFIRMED with nothing captured against it.
+      -- 2. Settled with nothing captured against it.
+      --
+      -- COMPLETED is included as well as CONFIRMED. A booking that ran to
+      -- completion with no captured charge is a room given away for free just
+      -- as surely as a confirmed one, and leaving it out would mean the check
+      -- stopped applying the moment a booking's start time passed.
       confirmation_without_capture AS (
         SELECT 'confirmation_without_capture' AS kind,
                b.id AS booking_id, NULL::text AS charge_id,
                b.total_minor::text AS amount_minor,
-               'booking is CONFIRMED with no SUCCEEDED payment' AS detail,
+               'booking is ' || b.status || ' with no settled payment' AS detail,
                b.updated_at AS observed_at
           FROM bookings b
-         WHERE b.status = 'CONFIRMED'
+         WHERE b.status IN ('CONFIRMED','COMPLETED')
            AND b.updated_at >= ${from} AND b.updated_at < ${to}
            AND b.updated_at < now() - ${grace}
            AND NOT EXISTS (
@@ -140,14 +220,39 @@ export class ReconciliationService {
            )
       ),
 
-      -- 5. refund promised, never settled.
+      -- 5a. a refund key was minted and the provider was never reached.
+      --
+      -- Split from 5b in P5, because the two mean very different things and
+      -- reporting them under one name made a soak result unreadable. This is
+      -- the alarming case: we committed to refunding and have no evidence the
+      -- provider ever heard about it.
       refund_initiated_not_settled AS (
         SELECT 'refund_initiated_not_settled' AS kind,
                booking_id, charge_id, amount_minor::text AS amount_minor,
-               'a refund idempotency key was minted but no refund has settled' AS detail,
+               'a refund key was minted but the provider returned no refund id' AS detail,
                updated_at AS observed_at
           FROM settled
          WHERE refund_idempotency_key IS NOT NULL
+           AND refund_id IS NULL
+           AND status <> 'REFUNDED'
+           AND updated_at < now() - ${grace}
+      ),
+
+      -- 5b. the provider accepted a refund and never told us it settled.
+      --
+      -- The money is at the provider and a refund id is recorded, so nothing is
+      -- lost — but our record disagrees with reality, which is the same class
+      -- of problem. This is what a lost settlement webhook looks like, and the
+      -- drainer now polls the provider to resolve it rather than waiting for a
+      -- delivery that will never come.
+      refund_accepted_not_settled AS (
+        SELECT 'refund_accepted_not_settled' AS kind,
+               booking_id, charge_id, amount_minor::text AS amount_minor,
+               'the provider accepted refund ' || refund_id
+                 || ' but no settlement has been recorded' AS detail,
+               updated_at AS observed_at
+          FROM settled
+         WHERE refund_id IS NOT NULL
            AND status <> 'REFUNDED'
            AND updated_at < now() - ${grace}
       ),
@@ -179,45 +284,14 @@ export class ReconciliationService {
            AND w.received_at < now() - ${grace}
       )
 
-      SELECT kind, booking_id::text AS booking_id, charge_id, amount_minor, detail,
-             to_char(observed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS observed_at
-        FROM (
-          SELECT * FROM capture_without_confirmation
-          UNION ALL SELECT * FROM confirmation_without_capture
-          UNION ALL SELECT * FROM double_capture
-          UNION ALL SELECT * FROM refund_without_capture
-          UNION ALL SELECT * FROM refund_initiated_not_settled
-          UNION ALL SELECT * FROM over_refunded
-          UNION ALL SELECT * FROM unmatched_delivery
-        ) all_discrepancies
-       ORDER BY observed_at DESC
-       LIMIT 500
-    `);
-
-    const totals = await this.db.execute<{
-      captured_minor: string;
-      refunded_minor: string;
-      confirmed_bookings: string;
-      settled_payments: string;
-    }>(sql`
-      SELECT
-        COALESCE(SUM(p.amount_minor) FILTER (WHERE p.status IN ('SUCCEEDED','REFUNDED')), 0)::text
-          AS captured_minor,
-        COALESCE(SUM(p.refunded_minor), 0)::text AS refunded_minor,
-        COUNT(*) FILTER (WHERE b.status = 'CONFIRMED')::text AS confirmed_bookings,
-        COUNT(*) FILTER (WHERE p.status IN ('SUCCEEDED','REFUNDED'))::text AS settled_payments
-        FROM payments p
-        JOIN bookings b ON b.id = p.booking_id
-       WHERE p.created_at >= ${from} AND p.created_at < ${to}
-    `);
-
-    return {
-      from: from.toISOString(),
-      to: to.toISOString(),
-      grace_seconds: graceSeconds,
-      discrepancy_count: result.rows.length,
-      discrepancies: result.rows,
-      totals: (totals.rows[0] ?? {}) as unknown as Record<string, string>,
-    };
+      SELECT * FROM capture_without_confirmation
+      UNION ALL SELECT * FROM confirmation_without_capture
+      UNION ALL SELECT * FROM double_capture
+      UNION ALL SELECT * FROM refund_without_capture
+      UNION ALL SELECT * FROM refund_initiated_not_settled
+      UNION ALL SELECT * FROM refund_accepted_not_settled
+      UNION ALL SELECT * FROM over_refunded
+      UNION ALL SELECT * FROM unmatched_delivery
+    `;
   }
 }

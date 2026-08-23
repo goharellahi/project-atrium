@@ -4,8 +4,10 @@ Engineering decisions where a reasonable alternative existed, what was chosen,
 what was rejected, and what the choice costs. A decision with no cost listed is
 not a decision, it is a preference.
 
-> **Written as decisions are made, not reconstructed at the end.** Entries below
-> are from P4 (payment integrity and tenant isolation). The P0–P2 decisions —
+> **Written as decisions are made, not reconstructed at the end.** Entries 1–8
+> are from P4 (payment integrity and tenant isolation); 9–11 are from P5, and
+> every one of those was forced by running the system rather than reasoning
+> about it. The P0–P2 decisions —
 > the exclusion constraint over query-then-insert, the sweep line over
 > `SUM(quantity)`, advisory-lock election over an environment flag, minor units
 > as `bigint` — currently live in `ARCHITECTURE.md` §3 and §7 and are folded in
@@ -177,3 +179,92 @@ publishes. The line drawn is *who*, not *what*: an endpoint that says a slot is
 taken is catalogue; one that says who has it is tenant data. The INV-6 suite
 probes both catalogue endpoints for the absence of booking ids, user ids and
 emails, so the line is asserted rather than asserted-to.
+
+---
+
+## 9. Holds queue on a per-room advisory lock before touching the exclusion index
+
+**Chosen.** `pg_advisory_xact_lock(4771, hashtext(room_id))` as the first
+statement of the hold transaction, plus a bounded retry on class-40 aborts with
+a 2–6 ms backoff.
+
+**Rejected: nothing at all**, which is what P2 shipped. It is correct and it
+passes the proof — once. Run the proof five times and Postgres logs 227
+deadlocks: concurrent inserts of the same range into a gist exclusion index wait
+on each other's xids and form cycles, and a cycle is only broken after
+`deadlock_timeout`, a full second. A second of lock wait per deadlock across a
+20-connection pool produced 59 5xx on the fifth run.
+
+**Rejected: retrying harder.** Tried first, with a 10–30 ms exponential backoff,
+and it took a run from 1 stray 500 to 170. A retrying request holds its pool
+connection through another contended transaction, so the budget multiplies queue
+depth. A retry must be shorter than the transaction it retries or it becomes the
+load.
+
+**Rejected: a bigger pool.** Buys queueing inside Postgres rather than
+throughput, and does nothing about the one-second detection latency that is the
+actual cost.
+
+**What it costs.** Holds for one room now serialise on a lock as well as on the
+constraint — but they had to serialise anyway, so the cost is a hash computation
+per hold. Two rooms whose ids collide in `hashtext` would queue behind each
+other; that costs throughput on those two rooms and never correctness.
+
+**The thing to keep straight.** This is a queueing discipline, not a correctness
+mechanism. `no_room_overlap` still decides every admission and deleting this
+line changes throughput, not outcomes. It is emphatically not the in-process
+mutex CLAUDE.md rejects — the lock lives in Postgres and holds across all three
+replicas. Numbers in ARCHITECTURE.md Appendix B.
+
+---
+
+## 10. The payment channel pulls as well as pushes
+
+**Chosen.** The webhook drainer polls the provider for any refund it accepted
+and has not reported on within `REFUND_POLL_AFTER_SECONDS`, and applies the
+answer through the same `payment_events` gate a webhook would.
+
+**Rejected: trusting the webhook channel alone.** Which is what P4 did. Paygate
+corrupts 2% of delivery signatures and never retries a delivery, so those
+messages are gone permanently — the API correctly answers 401 and the business
+effect they carried is lost. The soak lost six refunds that way: money genuinely
+returned, `refund_id` recorded, `payments.status` stuck on SUCCEEDED forever. An
+at-least-once channel that is at-most-once for 2% of messages cannot be the only
+source of truth about money.
+
+**Rejected: marking a payment REFUNDED as soon as a refund id comes back.** It
+would have closed the same gap in one line, and it would be a lie. The
+synchronous response is `202 processing`; accepted is not settled. Recording
+settlement we have not observed is modelling a provider that does not exist,
+which is the exact failure `payment-provider.ts` was written in P2 to avoid.
+
+**Rejected: making the reconciliation endpoint repair as a side effect of being
+read.** A report that mutates what it reports on cannot be trusted as a report,
+and it would only ever run when someone happened to look.
+
+**What it costs.** One extra provider call per stale refund, on a drain tick,
+and a new failure surface in the drainer. The poll deliberately waits 45 seconds
+first, so it never races a webhook that is merely in flight.
+
+---
+
+## 11. Signed webhook bodies are stored as `text`, never `jsonb`
+
+**Chosen.** `webhook_deliveries.raw_body text NOT NULL` — the exact bytes
+received.
+
+**Rejected: `jsonb`.** Which is what P4 shipped, and it broke the payment path
+outright: Drizzle hands a string to the driver as a jsonb literal and parses it
+back on read, so every delivery failed with
+`"[object Object]" is not valid JSON` and nothing was ever confirmed.
+
+But the type would have been wrong even if it had worked. jsonb normalises key
+order, whitespace and number formatting — precisely the things an HMAC is
+computed over. A column that reformats signed bytes destroys the only evidence
+that can settle a signature dispute.
+
+**What it costs.** No indexing or querying into the body, and no validation at
+write time. Both are fine: the fields worth querying (`charge_id`, `reference`,
+`event`) are extracted into their own columns at ingest, and validating a body
+before its signature is checked would be trusting exactly the bytes under
+suspicion.

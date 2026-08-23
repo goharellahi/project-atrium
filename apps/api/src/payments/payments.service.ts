@@ -6,7 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
 import type { Db } from '../db/client';
 import {
   auditEvents,
@@ -23,6 +23,7 @@ import { log } from '../common/logger';
 import type { Env } from '../config/env';
 import type { AuthPrincipal } from '../common/context/request-context';
 import { getCorrelationId } from '../common/context/request-context';
+import { withTransientRetry } from '../common/retry-transaction';
 import {
   BookingStateMachine,
   SYSTEM_ACTOR,
@@ -123,7 +124,13 @@ export class PaymentsService {
   async pay(bookingId: string, principal: AuthPrincipal): Promise<unknown> {
     const idempotencyKey = chargeKey(bookingId);
 
-    const prepared = await this.db.transaction(async (tx) => {
+    // Retried on a class-40 rollback like the hold path, and safe for the same
+    // reason: everything in here is inside one transaction, and Paygate is not
+    // called until after it commits. A deadlock leaves nothing behind.
+    const prepared = await withTransientRetry(
+      'payments.pay',
+      () =>
+      this.db.transaction(async (tx) => {
       const booking = await this.loadOwned(tx, bookingId, principal);
 
       const existing = await this.findPaymentByKey(tx, idempotencyKey);
@@ -190,8 +197,10 @@ export class PaymentsService {
         });
       }
 
-      return { booking, payment, alreadySettled: false };
-    });
+        return { booking, payment, alreadySettled: false };
+      }),
+      this.env.TRANSIENT_RETRY_ATTEMPTS,
+    );
 
     if (prepared.alreadySettled) {
       return this.presentPayment(prepared.payment, 'replayed');
@@ -341,9 +350,9 @@ export class PaymentsService {
         reference: input.reference,
         event: input.event,
         signatureValid: input.signatureValid,
-        // Stored as a JSON string, not a parsed object: the parsed form is a
-        // lossy re-encoding of what was actually signed, and when a signature
-        // dispute happens the exact bytes are the only useful evidence.
+        // The exact bytes, in a text column. The parsed form is a lossy
+        // re-encoding of what was signed, and when a signature dispute happens
+        // those bytes are the only useful evidence.
         rawBody: input.raw,
         error: input.error,
         processedAt: input.processedAt,
@@ -367,8 +376,14 @@ export class PaymentsService {
    * an HTTP round trip to a provider that deliberately hangs.
    */
   async applyDelivery(deliveryRowId: string): Promise<void> {
-    const instruction = await this.db.transaction(async (tx) =>
-      this.applyInTransaction(tx, deliveryRowId),
+    // Three replicas drain the same queue and each apply takes a booking row
+    // lock, so two deliveries for two bookings that share a room can deadlock.
+    // Transient, fully rolled back, and the delivery is still unprocessed —
+    // retrying here just saves waiting for the next sweep.
+    const instruction = await withTransientRetry(
+      'payments.applyDelivery',
+      () => this.db.transaction(async (tx) => this.applyInTransaction(tx, deliveryRowId)),
+      this.env.TRANSIENT_RETRY_ATTEMPTS,
     );
 
     if (instruction) await this.settleRefund(instruction);
@@ -387,7 +402,9 @@ export class PaymentsService {
 
     if (!delivery || delivery.processedAt !== null) return null;
 
-    const body = JSON.parse(String(delivery.rawBody)) as WebhookBody;
+    // `raw_body` is text — the exact bytes received. See the schema comment for
+    // why it must not be jsonb, and what broke when it was.
+    const body = JSON.parse(delivery.rawBody) as WebhookBody;
     const chargeId = asString(body.charge_id);
     const event = asString(body.event);
     const reference = asString(body.reference);
@@ -732,7 +749,10 @@ export class PaymentsService {
    * captured charge, so there is nothing to refund and this is a no-op.
    */
   async settleCancellation(bookingId: string): Promise<RefundBreakdownView | null> {
-    const instruction = await this.db.transaction(async (tx) => {
+    const instruction = await withTransientRetry(
+      'payments.settleCancellation',
+      () =>
+      this.db.transaction(async (tx) => {
       const [booking] = await tx
         .select()
         .from(bookings)
@@ -802,7 +822,9 @@ export class PaymentsService {
         } satisfies RefundInstruction,
         breakdown,
       };
-    });
+      }),
+      this.env.TRANSIENT_RETRY_ATTEMPTS,
+    );
 
     if (!instruction) return null;
 
@@ -815,6 +837,121 @@ export class PaymentsService {
       equipment_refund_minor: instruction.breakdown.equipment_refund_minor.toString(),
       total_refund_minor: instruction.breakdown.total_refund_minor.toString(),
     };
+  }
+
+  /**
+   * Settle refunds the provider accepted but never told us about.
+   *
+   * The webhook channel is at-least-once in principle and at-most-once in
+   * practice for the 2% of deliveries whose signature Paygate deliberately
+   * corrupts — those are correctly rejected with 401, and Paygate never retries
+   * a delivery. The soak caught six refunds in that state: the money genuinely
+   * went back, `refund_id` was recorded from the synchronous 202, and
+   * `payments.status` stayed SUCCEEDED forever because the settlement webhook
+   * never arrived. Reconciliation flagged all six, which is the report doing
+   * its job — and left them flagged, which is the system failing to do its own.
+   *
+   * So the system asks instead of waiting to be told. That is the whole fix: a
+   * push channel that can drop a message permanently cannot be the only source
+   * of truth about money.
+   *
+   * Note what this does NOT do. It does not mark a payment REFUNDED because we
+   * hold a refund id — accepted is not settled, and assuming otherwise would be
+   * modelling a provider that does not exist. It asks the provider, and applies
+   * the answer through the same `payment_events` gate a webhook would, so a
+   * webhook arriving late afterwards is absorbed rather than double-applied.
+   */
+  async settleAcceptedRefunds(olderThanSeconds: number, limit = 50): Promise<number> {
+    const stale = await this.db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          isNotNull(payments.refundId),
+          ne(payments.status, 'REFUNDED'),
+          lt(payments.updatedAt, new Date(Date.now() - olderThanSeconds * 1000)),
+        ),
+      )
+      .limit(limit);
+
+    let settled = 0;
+
+    for (const payment of stale) {
+      if (!payment.refundId || !payment.chargeId) continue;
+
+      try {
+        const state = await this.provider.getRefund(payment.refundId);
+
+        if (state === null) {
+          // The provider has never heard of a refund we hold an id for. That is
+          // a genuine inconsistency and not something to paper over; leave it
+          // for the reconciler to keep reporting.
+          log().error(
+            { paymentId: payment.id, refundId: payment.refundId },
+            'payment.refund.unknown_to_provider',
+          );
+          continue;
+        }
+
+        if (state.status !== 'succeeded') continue;
+
+        // Returns whether THIS replica applied the effect. All three poll, and
+        // all three will find the same stale refund; only the one that wins the
+        // payment_events insert has actually done anything, and only it should
+        // say so. The first version logged and counted on every replica, which
+        // turned six repairs into eighteen in the log — a money line that
+        // overcounts is worse than no line.
+        const applied = await withTransientRetry(
+          'payments.settleAcceptedRefunds',
+          () =>
+            this.db.transaction(async (tx) => {
+              // The same idempotency gate the webhook path uses. If the lost
+              // delivery ever does arrive, it finds the effect already applied.
+              const [claimed] = await tx
+                .insert(paymentEvents)
+                .values({
+                  chargeId: payment.chargeId!,
+                  event: 'refund.succeeded',
+                  occurredAt: new Date(),
+                })
+                .onConflictDoNothing({
+                  target: [paymentEvents.chargeId, paymentEvents.event],
+                })
+                .returning({ id: paymentEvents.id });
+
+              if (!claimed) return false;
+
+              await this.onRefundSucceeded(
+                tx,
+                payment,
+                state.refundId,
+                Number(state.amountMinor),
+              );
+              return true;
+            }),
+          this.env.TRANSIENT_RETRY_ATTEMPTS,
+        );
+
+        if (!applied) continue;
+
+        settled += 1;
+        log().warn(
+          { paymentId: payment.id, refundId: payment.refundId, chargeId: payment.chargeId },
+          'payment.refund.settled_by_polling',
+        );
+      } catch (err: unknown) {
+        log().error(
+          {
+            paymentId: payment.id,
+            refundId: payment.refundId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'payment.refund.poll_failed',
+        );
+      }
+    }
+
+    return settled;
   }
 
   // -------------------------------------------------------------------------
@@ -853,9 +990,26 @@ export class PaymentsService {
       .limit(1);
 
     if (!platform) {
-      // Migration 0003 seeds this. Its absence is a broken deployment, not a
-      // business case to guess a default for.
-      throw new Error('No platform default cancellation policy exists');
+      /**
+       * Migration 0003 inserts this row and the seed restores it after its
+       * truncate. Its absence is a broken deployment, not a business case to
+       * guess a default for — refunding nothing and refunding everything are
+       * both defensible here and both wrong to choose silently.
+       *
+       * 503, not 500. A 500 says the server was surprised; this is a known,
+       * named, fixable state and the response says exactly how to fix it. In
+       * P4 this threw a bare Error, which meant a freshly seeded database
+       * answered `GET /venues/cancellation-policy` with an opaque 500 and — far
+       * worse — every `charge.succeeded` threw inside the worker transaction,
+       * so no booking could reach CONFIRMED at all. Found in P5 by running it.
+       */
+      throw new ServiceUnavailableException({
+        statusCode: 503,
+        error: 'Service Unavailable',
+        message:
+          'No platform default cancellation policy exists. Migration 0003 inserts it; re-run migrations or re-seed. Bookings cannot be confirmed until it is present.',
+        remedy: 'node dist/db/migrate.js, or pnpm seed',
+      });
     }
 
     return { tiers: TiersSchema.parse(platform.tiers), policyId: platform.id, from: 'platform' };

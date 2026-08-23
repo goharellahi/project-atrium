@@ -1,6 +1,9 @@
 import 'reflect-metadata';
 import { NestFactory } from '@nestjs/core';
+import type { INestApplication } from '@nestjs/common';
+import type { Pool } from 'pg';
 import { AppModule } from './app.module';
+import { PG_POOL } from './app.tokens';
 import { logger } from './common/logger';
 import { loadEnv } from './config/env';
 import { runMigrations } from './db/migrate';
@@ -46,6 +49,37 @@ async function bootstrap(): Promise<void> {
     { port: env.API_PORT, replica: env.REPLICA_ID, nodeEnv: env.NODE_ENV },
     'atrium-api listening',
   );
+
+  await warnIfNoDefaultPolicy(app);
+}
+
+/**
+ * Say so at boot if the platform default cancellation policy is missing.
+ *
+ * Not a crash: a replica that refuses to start over one missing row takes the
+ * search, availability and hold paths down with it, and those are unaffected.
+ * But it must not be silent either — in P4 it was, and the symptom was every
+ * `charge.succeeded` throwing inside the worker with nothing at boot to explain
+ * why. One greppable line at startup is the cheapest possible fix for that.
+ */
+async function warnIfNoDefaultPolicy(app: INestApplication): Promise<void> {
+  try {
+    const pool = app.get<Pool>(PG_POOL);
+    const result = await pool.query(
+      'SELECT 1 FROM cancellation_policies WHERE venue_id IS NULL LIMIT 1',
+    );
+    if (result.rowCount === 1) return;
+
+    logger.error(
+      { remedy: 'node dist/db/migrate.js, or pnpm seed' },
+      'NO PLATFORM DEFAULT CANCELLATION POLICY — bookings cannot be confirmed until one exists',
+    );
+  } catch (err: unknown) {
+    logger.warn(
+      { err: err instanceof Error ? err.message : String(err) },
+      'could not check for the platform default cancellation policy',
+    );
+  }
 }
 
 void bootstrap().catch((err: unknown) => {

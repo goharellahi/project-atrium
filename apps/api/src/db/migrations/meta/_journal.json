@@ -29,6 +29,20 @@
       "when": 1787461620297,
       "tag": "0003_default_cancellation_policy",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1787495730001,
+      "tag": "0004_raw_body_is_text",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1787495731001,
+      "tag": "0005_audit_clock_timestamp",
+      "breakpoints": true
     }
   ]
 }

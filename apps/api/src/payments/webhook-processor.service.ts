@@ -3,15 +3,12 @@ import {
   type OnApplicationBootstrap,
   type OnApplicationShutdown,
 } from '@nestjs/common';
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, isNull } from 'drizzle-orm';
 import type { Db } from '../db/client';
 import { webhookDeliveries } from '../db/schema';
 import { logger } from '../common/logger';
 import type { Env } from '../config/env';
 import { PaymentsService } from './payments.service';
-
-/** Distinct from the hold sweeper's key; the two must not elect one another. */
-const DRAIN_LOCK_KEY = 0x4154_5249_554d_02n;
 
 const BATCH_SIZE = 100;
 
@@ -41,11 +38,13 @@ const BATCH_SIZE = 100;
  *
  * ## Two triggers, and both are needed
  *
- * The controller kicks `drainOne` immediately after recording a delivery, so
- * the common case has no added latency. The interval sweep is the safety net
- * for whatever that kick missed — a crash, a lost race, a delivery that landed
- * early. Election is by advisory lock, the same mechanism and for the same
- * reason as the hold sweeper: three identical replicas, no configuration.
+ * The controller kicks the delivery immediately after recording it, so the
+ * common case has no added latency. The interval sweep is the safety net for
+ * whatever that kick missed — a crash, a lost race, a delivery that landed
+ * before the payments row it belongs to.
+ *
+ * All three replicas drain. There is no election, and `tick` explains why the
+ * one P4 had was doing nothing.
  */
 @Injectable()
 export class WebhookProcessor implements OnApplicationBootstrap, OnApplicationShutdown {
@@ -100,24 +99,40 @@ export class WebhookProcessor implements OnApplicationBootstrap, OnApplicationSh
     this.running = true;
 
     try {
-      const elected = await this.db.transaction(async (tx) => {
-        const held = await tx.execute<{ locked: boolean }>(
-          sql`SELECT pg_try_advisory_xact_lock(${DRAIN_LOCK_KEY.toString()}::bigint) AS locked`,
-        );
-        if (held.rows[0]?.locked !== true) return [];
-
-        return tx
-          .select({ id: webhookDeliveries.id })
-          .from(webhookDeliveries)
-          .where(
-            and(
-              isNull(webhookDeliveries.processedAt),
-              eq(webhookDeliveries.signatureValid, true),
-            ),
-          )
-          .orderBy(asc(webhookDeliveries.receivedAt))
-          .limit(BATCH_SIZE);
-      });
+      /**
+       * No advisory-lock election here, and its removal is deliberate.
+       *
+       * P4 wrapped this SELECT in `pg_try_advisory_xact_lock`, copying the hold
+       * sweeper. It did not do what the comment claimed. The lock is
+       * transaction-scoped and the transaction only ran a SELECT, so it was
+       * released within a millisecond — and since all three replicas tick on
+       * the same interval, all three simply won the election in turn and then
+       * processed the identical batch. The P5 logs show exactly that: the same
+       * six delivery ids failing on api1, api2 and api3 within 20ms.
+       *
+       * Electing a single drainer properly would need the lock held across the
+       * whole drain, which means either a session-scoped lock (unsafe behind a
+       * connection pool — it pins to whichever pooled connection took it) or a
+       * claim column. Neither is worth it, because the guard that actually
+       * matters is one layer down: `applyInTransaction` takes `FOR UPDATE` on
+       * the delivery row and returns immediately if `processed_at` is set. A
+       * second replica therefore blocks, sees the work is done, and stops.
+       *
+       * So the cost of concurrent drainers is a little duplicated reading, not
+       * duplicated effect, and this now says so instead of implying a guarantee
+       * it never provided.
+       */
+      const elected = await this.db
+        .select({ id: webhookDeliveries.id })
+        .from(webhookDeliveries)
+        .where(
+          and(
+            isNull(webhookDeliveries.processedAt),
+            eq(webhookDeliveries.signatureValid, true),
+          ),
+        )
+        .orderBy(asc(webhookDeliveries.receivedAt))
+        .limit(BATCH_SIZE);
 
       let applied = 0;
       for (const row of elected) {
@@ -136,6 +151,30 @@ export class WebhookProcessor implements OnApplicationBootstrap, OnApplicationSh
       if (applied > 0) {
         logger.info({ applied, replica: this.env.REPLICA_ID }, 'webhook backlog drained');
       }
+
+      /**
+       * The pull half of the payment channel.
+       *
+       * Draining the queue only ever applies messages that arrived. A delivery
+       * whose signature Paygate corrupted is rejected and never resent, so the
+       * settlement it carried is lost for good — the P5 soak lost six refunds
+       * that way, all of which the provider had genuinely completed. This asks
+       * the provider directly about anything accepted-but-unsettled.
+       *
+       * The delay before asking is deliberate: a refund accepted two seconds
+       * ago is not late, it is in flight, and polling it would be asking the
+       * provider to confirm what its own webhook is about to say.
+       */
+      const repaired = await this.payments.settleAcceptedRefunds(
+        this.env.REFUND_POLL_AFTER_SECONDS,
+      );
+      if (repaired > 0) {
+        logger.warn(
+          { repaired, replica: this.env.REPLICA_ID },
+          'refunds settled by polling the provider — their webhooks never arrived',
+        );
+      }
+
       return applied;
     } catch (err: unknown) {
       logger.error(
