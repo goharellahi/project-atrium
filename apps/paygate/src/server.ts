@@ -1,29 +1,45 @@
-import Fastify from 'fastify';
+import { buildApp } from './app.js';
+import { loadConfig } from './config.js';
 
 /**
- * Paygate scaffold.
+ * Paygate — the mock payment provider, built to brief §06.
  *
- * Only the health route exists today. The charge, refund and webhook-delivery
- * machinery — and the six chaos behaviours from brief §06 (duplicate delivery,
- * race on response, transient 500s, delayed delivery, out-of-order, bad
- * signature) — are built in P5. See PLAN.md.
+ * Paygate is a separate process with its own port on purpose: the API must
+ * reach it over HTTP so the failure modes are real network failures, and so
+ * the webhook genuinely arrives back through the load balancer on whichever
+ * replica nginx picks — not necessarily the one that submitted the charge.
+ * A stubbed in-process function that always resolves would test nothing.
  *
- * Paygate is intentionally a separate service with its own process: the API
- * must talk to it over HTTP so the failure modes are real network failures,
- * not a stubbed function that always resolves.
+ * See apps/paygate/README.md for the env vars, the chaos flags, how to force a
+ * scenario, and a worked signature verification.
  */
-const app = Fastify({
-  logger: { level: process.env.LOG_LEVEL ?? 'info' },
-});
+const cfg = loadConfig();
+const { app } = buildApp(cfg);
 
-app.get('/health', async () => ({
-  status: 'ok',
-  service: 'paygate',
-  chaos: process.env.PAYGATE_CHAOS ?? 'off',
-}));
+async function main(): Promise<void> {
+  // Bind :: rather than 0.0.0.0. Docker's DNS hands out AAAA records, so an
+  // IPv4-only bind produced intermittent 502s through nginx in P1.
+  await app.listen({ port: cfg.port, host: '::' });
+  app.log.info(
+    {
+      port: cfg.port,
+      chaos: cfg.chaos ? 'on' : 'off',
+      seed: cfg.seed,
+      callback_url: cfg.callbackUrl,
+      test_endpoints: cfg.testEndpoints ? 'on' : 'off',
+    },
+    'paygate.started',
+  );
+}
 
-const port = Number(process.env.PAYGATE_PORT ?? 9000);
-app.listen({ port, host: '0.0.0.0' }).catch((err: unknown) => {
-  app.log.error(err);
+for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(signal, () => {
+    app.log.info({ signal }, 'paygate.shutdown');
+    void app.close().then(() => process.exit(0));
+  });
+}
+
+main().catch((err: unknown) => {
+  app.log.error({ err }, 'paygate.boot_failed');
   process.exit(1);
 });

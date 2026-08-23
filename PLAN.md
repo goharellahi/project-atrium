@@ -96,9 +96,25 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
 ## P3 — Paygate and payment integrity · `feat/p3-payments-paygate`
 
-- [ ] `POST /paygate/charges`, `POST /paygate/refunds`, HMAC-signed webhooks
-- [ ] All six chaos behaviours behind `PAYGATE_CHAOS=on`
-- [ ] Idempotency-Key honoured on charges and refunds
+Split across two branches because P2 and P3 ran in parallel. The provider was
+built on `feat/p3-paygate`, touching `apps/paygate/` only; the API-side payment
+integrity work lands separately once the booking core exists.
+
+**Paygate — the provider** (`feat/p3-paygate`, done)
+
+- [x] `POST /paygate/charges`, `POST /paygate/refunds`, HMAC-signed webhooks
+- [x] All six chaos behaviours behind `PAYGATE_CHAOS=on`
+- [x] Idempotency-Key honoured on charges and refunds, **including across a 500**
+- [x] Signature computed over raw body bytes, never a re-serialised object
+- [x] `PAYGATE_SEED` — every chaos decision replayable, per-decision not global
+- [x] `X-Request-Id` stored against the charge, echoed on every delivery
+- [x] `GET /paygate/charges/:id` — full delivery history for a reviewer
+- [x] `POST /paygate/_test/deliver` and `/_test/delay` — deterministic control
+      surface, outside the brief's spec, documented as such
+- [x] `apps/paygate/README.md`; 33 tests covering the contract and the rates
+
+**API — payment integrity** (not this branch)
+
 - [ ] Webhook handler idempotent **on business effect**, via
       `payment_events UNIQUE (charge_id, event)` (**INV-3**)
 - [ ] Bad signature → 401, logged, never processed
@@ -282,6 +298,59 @@ The through-line: every one of these was a deployment-target constraint that no
 amount of local testing would have surfaced, which is the argument for doing the
 deploy in P1 rather than at the end. Discovering them during P8 would have cost
 the deployment hard cap.
+
+### 2026-08-23 — P3 Paygate complete (provider only)
+
+`apps/paygate/` only. The API-side payment integrity half of P3 is untouched and
+still open; it depends on the booking core from P2.
+
+All six chaos behaviours are in, at the brief's rates, verified over a
+20,000-key sample rather than asserted. Two design calls are worth recording
+because they are not what the obvious implementation would do:
+
+1. **The idempotency record is written before the 10% transient-failure branch
+   is evaluated.** The naive order — decide the 500 first, record only on
+   success — cannot satisfy "a retry with the same Idempotency-Key must not
+   produce a second charge", because after a 500 the key is unknown and the
+   retry mints a new charge. Writing the key first means the charge id survives
+   the 500; the charge exists but is *not materialised* (no outcome, no webhook)
+   until a retry adopts it. That distinction is the whole contract.
+
+2. **Chaos is seeded per decision, not from one global stream.** A single shared
+   PRNG would have made `PAYGATE_SEED` a lie under concurrency: the same seed
+   produces different branches depending on how the event loop interleaved
+   requests. Each decision is instead seeded from
+   `(PAYGATE_SEED, Idempotency-Key, label)`, so a charge's branch is
+   order-independent and a 200-request run replays exactly. Verified: two runs
+   at seed `replay-me` produced an identical 500 pattern and identical duplicate
+   counts; a different seed diverged.
+
+**Race and delayed delivery are drawn from a single uniform**, not two
+independent coins — a delivery cannot both precede the 202 and arrive 60 seconds
+late, and independent draws would have silently given 23.75% races instead of
+the specified 25%.
+
+**Documented extensions to §06**, both additive:
+
+- `charge.failed` and `refund.succeeded` events. The brief names only
+  `charge.succeeded`; without the other two the API cannot reach FAILED and INV-4
+  has no evidence the automatic refund settled. `refund.succeeded` carries an
+  extra `refund_id` field.
+- `POST /paygate/_test/deliver` and `POST /paygate/_test/delay`, behind
+  `PAYGATE_TEST_ENDPOINTS`. Chaos rates are a property of the population; an
+  INV-3 or INV-4 test that waits for a 30% branch to fire is a coin flip, not a
+  test. Marked clearly as outside the spec in `apps/paygate/README.md`.
+
+**Not done, deliberately:** no retry when a delivery hits an unreachable
+callback — the brief's chaos table does not ask for it and it would add a second
+source of duplicate deliveries on top of the specified 30%. Idempotency keys are
+never expired. Both recorded in the Paygate README's Known Limitations.
+
+**One thing outside this branch's scope that needs attention:** `docker-compose.yml`
+sets `PAYGATE_WEBHOOK_URL`, the brief calls it `PAYGATE_CALLBACK_URL`, and
+`PAYGATE_SEED` is not set anywhere. Paygate accepts both names so nothing is
+broken, but compose passes no seed, so the deployed stack runs on the default.
+Left alone rather than edited from a paygate-scoped branch.
 
 ### 2026-08-23 — P2 complete: booking core and the concurrency proof
 
