@@ -55,8 +55,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] `.github/workflows/ci.yml` — install, migrate, typecheck, lint, test
 - [x] `README.md` with a populated Known Issues section
 - [x] `docker compose up` stands up all 8 services healthy from empty
-- [ ] **Deployed and reachable** — blocked on dashboard steps (see handoff)
-- [ ] CI green on this branch — cannot be observed until pushed
+- [x] **Deployed and reachable** — API on Render free, web on Vercel, both
+      answering `/health`
 
 ---
 
@@ -154,8 +154,8 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ## Deliverables checklist
 
 - [ ] Public git repository with real commit history
-- [ ] Deployed frontend URL, live and seeded
-- [ ] Deployed API URL, live and seeded
+- [~] Deployed API URL — live; seeding is P7
+- [~] Deployed frontend URL — live; the console itself is P6
 - [x] `README.md` (stub with Known Issues; final pass in P8)
 - [ ] `ARCHITECTURE.md` — all required sections
 - [ ] `DECISIONS.md`
@@ -229,8 +229,32 @@ DELETE; role/venue CHECK rejects both incoherent shapes. Auth verified through
 nginx: 201/200/401/409/422 all correct, `passwordHash` never serialised, and a
 register body carrying `role: PLATFORM_ADMIN` produces a CUSTOMER.
 
-**Not done:** the deployment itself. Blocked on dashboard steps that need a
-human. CI cannot be observed green until the branch is pushed.
-
 **Deliberately not built:** any booking logic, availability query, hold
 endpoint or seed script. Those are P2.
+
+### 2026-08-23 — P1 deployment landed
+
+Live on the free tiers, but it took four attempts and each failure was a real
+constraint worth recording rather than a typo:
+
+1. `preDeployCommand` is paid-tier only — the blueprint is rejected outright at
+   validation, before anything builds.
+2. `dockerCommand` is **not** run through a shell. Render treats the whole
+   string as a single executable name, so `sh -c "a && b"` exits 127 with
+   `sh: node dist/db/migrate.js && node dist/main.js: not found`. Shell
+   chaining is simply unavailable there.
+3. Resolution: migrations run in-process in `main.ts` before the server binds,
+   behind `RUN_MIGRATIONS_ON_BOOT`. No shell, no script file, no chmod — and no
+   CRLF trap, which a committed `.sh` would have hit on this Windows checkout.
+   The flag defaults to off so compose keeps its one-shot `migrate` service;
+   three replicas each migrating on boot would race.
+4. Vercel's Next.js detection reads the *installed* package before running the
+   build, so the no-op `installCommand` in `vercel.json` guaranteed
+   `No Next.js version detected`. Both overrides removed — Vercel resolves the
+   pnpm workspace root by itself. `output: 'standalone'` scoped to non-Vercel
+   builds, since it exists only for the Docker runtime stage.
+
+The through-line: every one of these was a deployment-target constraint that no
+amount of local testing would have surfaced, which is the argument for doing the
+deploy in P1 rather than at the end. Discovering them during P8 would have cost
+the deployment hard cap.
