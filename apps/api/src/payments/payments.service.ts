@@ -6,7 +6,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm';
 import type { Db } from '../db/client';
 import {
   auditEvents,
@@ -837,6 +837,121 @@ export class PaymentsService {
       equipment_refund_minor: instruction.breakdown.equipment_refund_minor.toString(),
       total_refund_minor: instruction.breakdown.total_refund_minor.toString(),
     };
+  }
+
+  /**
+   * Settle refunds the provider accepted but never told us about.
+   *
+   * The webhook channel is at-least-once in principle and at-most-once in
+   * practice for the 2% of deliveries whose signature Paygate deliberately
+   * corrupts — those are correctly rejected with 401, and Paygate never retries
+   * a delivery. The soak caught six refunds in that state: the money genuinely
+   * went back, `refund_id` was recorded from the synchronous 202, and
+   * `payments.status` stayed SUCCEEDED forever because the settlement webhook
+   * never arrived. Reconciliation flagged all six, which is the report doing
+   * its job — and left them flagged, which is the system failing to do its own.
+   *
+   * So the system asks instead of waiting to be told. That is the whole fix: a
+   * push channel that can drop a message permanently cannot be the only source
+   * of truth about money.
+   *
+   * Note what this does NOT do. It does not mark a payment REFUNDED because we
+   * hold a refund id — accepted is not settled, and assuming otherwise would be
+   * modelling a provider that does not exist. It asks the provider, and applies
+   * the answer through the same `payment_events` gate a webhook would, so a
+   * webhook arriving late afterwards is absorbed rather than double-applied.
+   */
+  async settleAcceptedRefunds(olderThanSeconds: number, limit = 50): Promise<number> {
+    const stale = await this.db
+      .select()
+      .from(payments)
+      .where(
+        and(
+          isNotNull(payments.refundId),
+          ne(payments.status, 'REFUNDED'),
+          lt(payments.updatedAt, new Date(Date.now() - olderThanSeconds * 1000)),
+        ),
+      )
+      .limit(limit);
+
+    let settled = 0;
+
+    for (const payment of stale) {
+      if (!payment.refundId || !payment.chargeId) continue;
+
+      try {
+        const state = await this.provider.getRefund(payment.refundId);
+
+        if (state === null) {
+          // The provider has never heard of a refund we hold an id for. That is
+          // a genuine inconsistency and not something to paper over; leave it
+          // for the reconciler to keep reporting.
+          log().error(
+            { paymentId: payment.id, refundId: payment.refundId },
+            'payment.refund.unknown_to_provider',
+          );
+          continue;
+        }
+
+        if (state.status !== 'succeeded') continue;
+
+        // Returns whether THIS replica applied the effect. All three poll, and
+        // all three will find the same stale refund; only the one that wins the
+        // payment_events insert has actually done anything, and only it should
+        // say so. The first version logged and counted on every replica, which
+        // turned six repairs into eighteen in the log — a money line that
+        // overcounts is worse than no line.
+        const applied = await withTransientRetry(
+          'payments.settleAcceptedRefunds',
+          () =>
+            this.db.transaction(async (tx) => {
+              // The same idempotency gate the webhook path uses. If the lost
+              // delivery ever does arrive, it finds the effect already applied.
+              const [claimed] = await tx
+                .insert(paymentEvents)
+                .values({
+                  chargeId: payment.chargeId!,
+                  event: 'refund.succeeded',
+                  occurredAt: new Date(),
+                })
+                .onConflictDoNothing({
+                  target: [paymentEvents.chargeId, paymentEvents.event],
+                })
+                .returning({ id: paymentEvents.id });
+
+              if (!claimed) return false;
+
+              await this.onRefundSucceeded(
+                tx,
+                payment,
+                state.refundId,
+                Number(state.amountMinor),
+              );
+              return true;
+            }),
+          this.env.TRANSIENT_RETRY_ATTEMPTS,
+        );
+
+        if (!applied) continue;
+
+        settled += 1;
+        log().warn(
+          { paymentId: payment.id, refundId: payment.refundId, chargeId: payment.chargeId },
+          'payment.refund.settled_by_polling',
+        );
+      } catch (err: unknown) {
+        log().error(
+          {
+            paymentId: payment.id,
+            refundId: payment.refundId,
+            err: err instanceof Error ? err.message : String(err),
+          },
+          'payment.refund.poll_failed',
+        );
+      }
+    }
+
+    return settled;
   }
 
   // -------------------------------------------------------------------------

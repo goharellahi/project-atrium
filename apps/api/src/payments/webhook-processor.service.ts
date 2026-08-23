@@ -151,6 +151,30 @@ export class WebhookProcessor implements OnApplicationBootstrap, OnApplicationSh
       if (applied > 0) {
         logger.info({ applied, replica: this.env.REPLICA_ID }, 'webhook backlog drained');
       }
+
+      /**
+       * The pull half of the payment channel.
+       *
+       * Draining the queue only ever applies messages that arrived. A delivery
+       * whose signature Paygate corrupted is rejected and never resent, so the
+       * settlement it carried is lost for good — the P5 soak lost six refunds
+       * that way, all of which the provider had genuinely completed. This asks
+       * the provider directly about anything accepted-but-unsettled.
+       *
+       * The delay before asking is deliberate: a refund accepted two seconds
+       * ago is not late, it is in flight, and polling it would be asking the
+       * provider to confirm what its own webhook is about to say.
+       */
+      const repaired = await this.payments.settleAcceptedRefunds(
+        this.env.REFUND_POLL_AFTER_SECONDS,
+      );
+      if (repaired > 0) {
+        logger.warn(
+          { repaired, replica: this.env.REPLICA_ID },
+          'refunds settled by polling the provider — their webhooks never arrived',
+        );
+      }
+
       return applied;
     } catch (err: unknown) {
       logger.error(

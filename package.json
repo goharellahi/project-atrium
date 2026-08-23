@@ -16,6 +16,7 @@
     "proof": "pnpm --filter @atrium/tests-concurrency proof",
     "authz": "pnpm --filter @atrium/tests-authz authz",
     "e2e": "pnpm --filter @atrium/tests-e2e e2e",
+    "soak": "pnpm --filter @atrium/tests-e2e soak",
     "seed": "pnpm --filter @atrium/api db:seed"
   },
   "devDependencies": {

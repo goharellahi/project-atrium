@@ -75,14 +75,25 @@ const EnvSchema = z.object({
   PAYGATE_TIMEOUT_MS: z.coerce.number().int().positive().default(8_000),
 
   /**
-   * How often each replica attempts to drain unapplied webhook deliveries.
+   * How often each replica drains unapplied webhook deliveries.
    *
-   * Like the hold sweeper, all three attempt it and a Postgres advisory lock
-   * elects one per tick. Short, because the backlog it drains includes the
-   * race-on-response case where a delivery arrived a few milliseconds before
-   * the payments row it belongs to.
+   * All three drain; there is no election, and WebhookProcessor.tick explains
+   * why the one P4 had was doing nothing. Short, because the backlog includes
+   * the race-on-response case where a delivery arrived a few milliseconds
+   * before the payments row it belongs to.
    */
   WEBHOOK_DRAIN_INTERVAL_SECONDS: z.coerce.number().int().positive().default(10),
+
+  /**
+   * How long a refund may sit accepted-but-unsettled before the API stops
+   * waiting for a webhook and asks the provider directly.
+   *
+   * Comfortably longer than Paygate's ordinary delivery latency and its 30%
+   * duplicate gap, so this never races a webhook that is simply on its way. It
+   * exists for the deliveries that will never arrive at all — the 2% whose
+   * signature was corrupted, which are correctly rejected and never resent.
+   */
+  REFUND_POLL_AFTER_SECONDS: z.coerce.number().int().positive().default(45),
 });
 
 export type Env = z.infer<typeof EnvSchema>;

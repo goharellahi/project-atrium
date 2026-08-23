@@ -39,8 +39,11 @@ export interface Discrepancy extends Record<string, unknown> {
  *   4. **refund_without_capture** — a refund recorded against a payment that
  *      never captured. Money leaving with nothing to have paid for it.
  *   5. **refund_initiated_not_settled** — a refund key was minted and the
- *      refund never came back. The customer is owed money the system believes
- *      it has returned.
+ *      provider returned no refund id. The customer is owed money the system
+ *      believes it has returned, with no evidence the provider was ever
+ *      reached. **refund_accepted_not_settled** is its milder sibling: the
+ *      provider accepted the refund and never reported settlement, which is
+ *      what a lost webhook looks like.
  *   6. **over_refunded** — more went back than came in.
  *   7. **unmatched_delivery** — a signed delivery still unapplied past the
  *      grace window, including the `unknown_charge` case. The provider says it
@@ -217,14 +220,39 @@ export class ReconciliationService {
            )
       ),
 
-      -- 5. refund promised, never settled.
+      -- 5a. a refund key was minted and the provider was never reached.
+      --
+      -- Split from 5b in P5, because the two mean very different things and
+      -- reporting them under one name made a soak result unreadable. This is
+      -- the alarming case: we committed to refunding and have no evidence the
+      -- provider ever heard about it.
       refund_initiated_not_settled AS (
         SELECT 'refund_initiated_not_settled' AS kind,
                booking_id, charge_id, amount_minor::text AS amount_minor,
-               'a refund idempotency key was minted but no refund has settled' AS detail,
+               'a refund key was minted but the provider returned no refund id' AS detail,
                updated_at AS observed_at
           FROM settled
          WHERE refund_idempotency_key IS NOT NULL
+           AND refund_id IS NULL
+           AND status <> 'REFUNDED'
+           AND updated_at < now() - ${grace}
+      ),
+
+      -- 5b. the provider accepted a refund and never told us it settled.
+      --
+      -- The money is at the provider and a refund id is recorded, so nothing is
+      -- lost — but our record disagrees with reality, which is the same class
+      -- of problem. This is what a lost settlement webhook looks like, and the
+      -- drainer now polls the provider to resolve it rather than waiting for a
+      -- delivery that will never come.
+      refund_accepted_not_settled AS (
+        SELECT 'refund_accepted_not_settled' AS kind,
+               booking_id, charge_id, amount_minor::text AS amount_minor,
+               'the provider accepted refund ' || refund_id
+                 || ' but no settlement has been recorded' AS detail,
+               updated_at AS observed_at
+          FROM settled
+         WHERE refund_id IS NOT NULL
            AND status <> 'REFUNDED'
            AND updated_at < now() - ${grace}
       ),
@@ -261,6 +289,7 @@ export class ReconciliationService {
       UNION ALL SELECT * FROM double_capture
       UNION ALL SELECT * FROM refund_without_capture
       UNION ALL SELECT * FROM refund_initiated_not_settled
+      UNION ALL SELECT * FROM refund_accepted_not_settled
       UNION ALL SELECT * FROM over_refunded
       UNION ALL SELECT * FROM unmatched_delivery
     `;

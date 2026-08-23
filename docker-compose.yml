@@ -34,6 +34,7 @@ x-api-base: &api-base
     PAYGATE_SECRET: ${PAYGATE_SECRET:-dev-paygate-hmac-secret}
     PAYGATE_TIMEOUT_MS: ${PAYGATE_TIMEOUT_MS:-8000}
     WEBHOOK_DRAIN_INTERVAL_SECONDS: ${WEBHOOK_DRAIN_INTERVAL_SECONDS:-10}
+    REFUND_POLL_AFTER_SECONDS: ${REFUND_POLL_AFTER_SECONDS:-45}
   depends_on:
     postgres:
       condition: service_healthy
