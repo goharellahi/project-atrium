@@ -249,8 +249,10 @@ never be committed. Do not quote the brief at length in committed files.
 
 ## Current phase
 
-**P1 — schema, constraints, auth, deploy skeleton. Complete except deployment.**
-Next: **P2 — booking core: availability, holds, state machine.**
+**P2 — booking core. Complete, including the 200-request concurrency proof
+(delivered early; transcript in `ARCHITECTURE.md` Appendix A) and the seed
+script (pulled forward from P7).**
+Next: **P3 — paygate and payment integrity**, on `feat/p3-payments-paygate`.
 
 See `PLAN.md` for the full phase list and the progress log.
 

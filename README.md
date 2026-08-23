@@ -75,6 +75,62 @@ Verify it came up:
 curl -s localhost:8080/health
 ```
 
+### Seeding
+
+One script, two profiles, one code path. `demo` fits a 500 MB free database
+(≈15 MB measured); `full` is the 250,000-booking set for the P7 load work.
+
+```bash
+docker compose exec api1 node dist/db/seed.js --profile=demo
+```
+
+```bash
+docker compose exec api1 node dist/db/seed.js --profile=full
+```
+
+It prints five test logins — one per role plus a **second `VENUE_ADMIN` at a
+different venue**, which is what INV-6 needs to be demonstrable at all — and a
+known-empty room and time window for probing by hand. Every seeded account
+shares the password the script prints.
+
+### The concurrency proof
+
+The mandatory 200-request proof. It needs the compose stack up (three replicas
+behind nginx); it does **not** need the seed, because it creates its own
+fixtures.
+
+```bash
+pnpm proof
+```
+
+It fires 200 requests, released together, at one room and one one-hour slot,
+and separately at an equipment type owning exactly 3 units across 200 distinct
+rooms. It asserts exactly one room booking, at most 3 equipment units, a clean
+409 for every loser, zero 5xx, that all three replicas served traffic, and then
+**re-reads the database directly** to confirm the rows agree with the
+responses.
+
+Transcript of the current run is in
+[ARCHITECTURE.md](ARCHITECTURE.md#appendix-a--concurrency-proof-output),
+Appendix A.
+
+### Endpoints as of P2
+
+| Method | Path | Notes |
+| --- | --- | --- |
+| `POST` | `/auth/register` `/auth/login` | Registration always creates a CUSTOMER |
+| `GET` | `/auth/me` | |
+| `GET` | `/search` | Cross-venue: city, capacity, amenities, price ceiling, availability window |
+| `GET` | `/rooms/:id/availability` | Free slots over a range. Advisory — see below |
+| `POST` | `/bookings/hold` | The core. 201, or 409 from `no_room_overlap` / equipment capacity |
+| `POST` | `/bookings/:id/checkout` | Re-arms the hold. At most twice, 30-minute lifetime cap |
+| `POST` | `/bookings/:id/cancel` | State only; refund amounts are P3 |
+| `GET` | `/bookings` `/bookings/:id` | Scope derived from the token, never from the request |
+
+`GET /rooms/:id/availability` is **advisory**. It reports what was free when it
+ran, and the hold path never consults it — a design in which that read gated the
+write would have a race in it by construction. `no_room_overlap` decides.
+
 ### Why three replicas
 
 Because a correctness strategy that only works inside a single process is not a
@@ -111,26 +167,45 @@ nginx/nginx.conf   round-robin LB over the three replicas
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
 
-**Current phase: P1 complete — schema, constraints, auth, deployment live.**
+**Current phase: P2 complete — booking core, seed, and the concurrency proof.**
 
-The API is deployed on Render's free tier and the console on Vercel. Both are
-reachable and answer `/health`. Neither is seeded yet — the seed script is P7 —
-so the deployed instance has an empty database and no test logins. Registering
-through `POST /auth/register` works today.
+The API is deployed on Render's free tier and the console on Vercel; both answer
+`/health`. **The deployed database is not seeded** — seeding runs against the
+local compose stack. Registering through `POST /auth/register` works on the
+deployed instance today.
 
 ### Not built yet
 
 Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 
-- **Booking endpoints.** No hold, availability, search or cancellation
-  endpoints exist. P2.
-- **Paygate.** The service boots and answers `/health`; charges, refunds,
-  webhook delivery and all six chaos behaviours are P3.
-- **The concurrency proof.** The exclusion constraint is verified by hand
-  against a real Postgres (transcript in ARCHITECTURE.md §3), but that is
-  single-connection evidence. The 200-request, three-replica proof is P4.
+- **Payments.** `apps/api/src/payments/payment-provider.ts` defines the
+  interface and binds a provider that throws. Paygate itself boots and answers
+  `/health`; charges, refunds, webhook delivery and all six chaos behaviours are
+  P3, on a separate branch.
+- **Refund amounts.** `POST /bookings/:id/cancel` changes state and returns
+  `refund: null`. What the customer is owed is computed against the policy
+  snapshot in P3; returning a placeholder number would be worse than none.
 - **Frontend.** `apps/web` is a placeholder page. P6.
-- **Seed script.** Neither profile exists yet, so nothing is seeded. P7.
+- **Venue administration.** Nothing writes `venues.overbooking_buffer_pct`, so
+  the room-side 422 for a non-zero buffer has no way to be triggered yet. P6.
+- **Indexing.** No indexing pass has been done and no `EXPLAIN ANALYZE`
+  captured. The P2 queries are written for correctness, not for plans. P7.
+
+### Tests that do not exist yet, and should
+
+Stated separately from the above because these are gaps in *evidence*, not in
+features — the more expensive kind to leave undocumented.
+
+- **State machine unit tests.** The transition table is exercised end to end by
+  the proof and by manual probes, but there is no per-edge suite. Cut for time
+  in P2, scheduled for P5.
+- **The INV-6 negative suite.** `tests/authz` is still a stub. Isolation was
+  verified by hand — a `VENUE_ADMIN` at venue B requesting a booking at another
+  venue by valid UUID gets 404, and `GET /bookings` totals differ per admin —
+  but *verified by hand* is not *tested*. P5.
+- **The proof has only been run against the `demo` profile** (25k bookings). It
+  has not been run against `full` (250k), where the gist index is doing
+  materially more work.
 
 ### Known limitations of what *is* built
 
@@ -139,6 +214,16 @@ Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
   `docker compose`, which is where the concurrency proof runs. The correctness
   argument does not depend on replica count — the mechanisms are in Postgres —
   but the deployment does not itself demonstrate that.
+- **Availability is advisory, deliberately.** `GET /rooms/:id/availability` can
+  offer a slot that a hold then rejects, because someone took it in between.
+  This is not a defect to be engineered away — it is why the hold path does not
+  consult it.
+- **The 15-minute turnaround applies to rooms only.** Equipment uses raw
+  `starts_at`/`ends_at`, not the buffered `slot` column. A tripod handed back at
+  14:00 is available at 14:00. ARCHITECTURE.md, Assumption 7.
+- **`GET /search` is cross-venue by design and is not tenant-scoped.** It
+  returns inventory — name, capacity, amenities, price — and no bookings,
+  customers or occupancy. ARCHITECTURE.md, Assumption 8.
 - **The 15-minute turnaround gap is a platform constant, not per-venue.** It is
   baked into a generated column, and a generated column cannot reference
   another table. Reasoning in ARCHITECTURE.md, Assumption 5.
