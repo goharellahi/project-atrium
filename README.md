@@ -87,7 +87,12 @@ nginx/nginx.conf   round-robin LB over the three replicas
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
 
-**Current phase: P1 complete — schema, constraints, auth, deploy skeleton.**
+**Current phase: P1 complete — schema, constraints, auth, deployment live.**
+
+The API is deployed on Render's free tier and the console on Vercel. Both are
+reachable and answer `/health`. Neither is seeded yet — the seed script is P7 —
+so the deployed instance has an empty database and no test logins. Registering
+through `POST /auth/register` works today.
 
 ### Not built yet
 
