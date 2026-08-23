@@ -181,6 +181,9 @@ interface SeedSummary {
   payments: number;
   bookings: number;
   lineItems: number;
+  /** What the generator meant to write, so a divergence from the count shows. */
+  intendedBookings: number;
+  intendedLineItems: number;
   emptyWindow: { room_id: string; room_name: string; starts_at: string; ends_at: string } | null;
   logins: { role: string; email: string; password: string; venue: string | null }[];
   elapsedSeconds: number;
@@ -267,19 +270,72 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
 
   await client.query('ANALYZE');
 
+  /**
+   * The summary is counted FROM THE DATABASE, not from what this process thinks
+   * it inserted.
+   *
+   * P5 caught the demo profile advertising 25,000 bookings and delivering
+   * 14,138, and the only reason that was catchable is that somebody went and
+   * counted. A summary assembled from in-memory tallies can only ever report
+   * the generator's intent — it agrees with itself by construction, including
+   * when a batch was rejected or an apportionment lost rows. Counting the
+   * tables closes that loop. It also caught this file over-reporting its own
+   * user count by three, which nobody had noticed because nothing checked.
+   *
+   * `written` is still returned alongside so a divergence is visible rather
+   * than smoothed over: if the generator meant to write 250,000 and the table
+   * holds fewer, the seed says both numbers.
+   */
+  const counted = await countRows(client);
+
   return {
     profile: profile.name,
-    venues: venues.length,
-    rooms: rooms.length,
-    equipmentTypes: equipment.length,
-    users: users.customers.length + users.staff.length + 1,
+    venues: counted.venues,
+    rooms: counted.rooms,
+    equipmentTypes: counted.equipment_types,
+    users: counted.users,
     policies,
-    payments,
-    bookings,
-    lineItems,
+    payments: counted.payments,
+    bookings: counted.bookings,
+    lineItems: counted.booking_line_items,
+    intendedBookings: bookings,
+    intendedLineItems: lineItems,
     emptyWindow,
     logins: users.logins,
     elapsedSeconds: Math.round((Date.now() - startedAt) / 100) / 10,
+  };
+}
+
+interface RowCounts {
+  venues: number;
+  rooms: number;
+  equipment_types: number;
+  users: number;
+  bookings: number;
+  booking_line_items: number;
+  payments: number;
+}
+
+/** Row counts straight from the tables the seed just wrote. */
+async function countRows(client: PoolClient): Promise<RowCounts> {
+  const { rows } = await client.query<Record<keyof RowCounts, string>>(`
+    SELECT (SELECT count(*) FROM venues)             AS venues,
+           (SELECT count(*) FROM rooms)              AS rooms,
+           (SELECT count(*) FROM equipment_types)    AS equipment_types,
+           (SELECT count(*) FROM users)              AS users,
+           (SELECT count(*) FROM bookings)           AS bookings,
+           (SELECT count(*) FROM booking_line_items) AS booking_line_items,
+           (SELECT count(*) FROM payments)           AS payments
+  `);
+  const row = rows[0]!;
+  return {
+    venues: Number(row.venues),
+    rooms: Number(row.rooms),
+    equipment_types: Number(row.equipment_types),
+    users: Number(row.users),
+    bookings: Number(row.bookings),
+    booking_line_items: Number(row.booking_line_items),
+    payments: Number(row.payments),
   };
 }
 
@@ -1081,14 +1137,24 @@ function walkRoomCalendar(
       ? venueEquipment[room.indexInVenue % venueEquipment.length]!
       : null;
 
-  const p = Math.min(1, target / capacity);
+  const want = Math.min(target, capacity);
   let index = 0;
 
   for (const slot of candidateSlots(venue, rangeStart, rangeEnd, geometry)) {
-    const take = Math.floor((index + 1) * p) > Math.floor(index * p);
+    // Integer arithmetic, not `i * (target / capacity)`.
+    //
+    // The float form is off by an ulp on some ratios, so `capacity * p` lands
+    // fractionally below `target` and the room emits one row fewer than it was
+    // allocated. Spread over 800 rooms that cost 46 bookings out of 250,000 —
+    // small, invisible, and precisely the kind of quiet shortfall this seed has
+    // already been caught delivering once. Multiplying first keeps every
+    // comparison exact, so a room emits its target or its capacity, never
+    // "almost".
+    const take =
+      Math.floor(((index + 1) * want) / capacity) > Math.floor((index * want) / capacity);
     index += 1;
     if (!take) continue;
-    if (drafts.length >= target) break;
+    if (drafts.length >= want) break;
 
     const isPast = slot.endsAt < now;
     const status = weightedStatus(rng, isPast ? PAST_STATUSES : FUTURE_STATUSES);
@@ -1242,6 +1308,16 @@ function report(s: SeedSummary): void {
       `${s.users} users · ${s.bookings} bookings · ${s.lineItems} line items · ` +
       `${s.payments} payments · ${s.policies} platform policy`,
   );
+  console.log('  (counted from the tables, not tallied in memory)');
+
+  // Said out loud, every time, rather than left for someone to notice. A seed
+  // that under-delivers silently is the exact failure P5 spent a phase finding.
+  if (s.bookings !== s.intendedBookings || s.lineItems !== s.intendedLineItems) {
+    console.log('');
+    console.log('  ⚠ SHORTFALL — the generator and the tables disagree:');
+    console.log(`      bookings   intended ${s.intendedBookings}, table holds ${s.bookings}`);
+    console.log(`      line items intended ${s.intendedLineItems}, table holds ${s.lineItems}`);
+  }
   console.log('');
   console.log('TEST LOGINS  (password is the same for every seeded account)');
   console.log('─'.repeat(78));
