@@ -6,10 +6,15 @@
   "description": "Cross-venue tenant isolation negative tests (INV-6).",
   "scripts": {
     "test": "vitest run --passWithNoTests",
+    "authz": "vitest run --config vitest.authz.config.ts --reporter=verbose",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "pg": "8.23.0"
   },
   "devDependencies": {
     "@types/node": "26.0.0",
+    "@types/pg": "8.15.6",
     "typescript": "6.0.3",
     "vitest": "4.1.11"
   }

@@ -6,6 +6,7 @@
   },
   "include": [
     "src/**/*",
-    "vitest.config.ts"
+    "vitest.config.ts",
+    "vitest.authz.config.ts"
   ]
 }
