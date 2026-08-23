@@ -241,7 +241,9 @@ integrity work lands separately once the booking core exists.
 ## Deliverables checklist
 
 - [ ] Public git repository with real commit history
-- [~] Deployed API URL — https://atrium-api-3p3j.onrender.com — live; seeding is P7
+- [~] Deployed API URL — https://atrium-api-3p3j.onrender.com — live. Paygate
+      now deploys alongside it (`render.yaml`), so the payment path works on the
+      deployed instance and not only locally. The database is still unseeded.
 - [~] Deployed frontend URL — https://project-atrium.vercel.app — live; the
       console itself is P6
 - [x] `README.md` (stub with Known Issues; final pass in P8)
@@ -658,3 +660,57 @@ correlation id survives into the webhook path, though the plumbing is there and
 Paygate echoes `X-Request-Id`. The per-edge state machine unit suite is still
 covered end to end rather than edge by edge. The proof has still only been run
 against the `demo` profile, not `full`.
+
+### 2026-08-23 — Paygate deployed alongside the API
+
+The P5 handoff raised it as a decision and the answer was to deploy it. Two
+things came out of doing so, and only one of them was the blueprint.
+
+**The blueprint.** `render.yaml` gains a second web service on the free plan,
+same region, same repo context. The shared HMAC secret is read from the API
+through `fromService` rather than generated twice — two independent secrets
+would leave every webhook 401ing, and that symptom reads as a signing bug rather
+than a configuration one. The two service URLs cannot be committed at all,
+because Render appends an unguessable suffix to each hostname, so they are
+`sync: false` and pasted once from the dashboard. That also keeps the blueprint
+valid on a fresh account, where neither hostname exists yet.
+
+**The thing that made it worth doing properly.** Deploying Paygate exposes a
+failure the local stack almost never sees: on a tier where both services sleep
+after fifteen idle minutes, the API answers 502 while it wakes, and a webhook
+delivered into that window is refused. Paygate does not retry a delivery — that
+is deliberate, since a retry would be a second source of duplicates on top of
+the specified 30% — so the message is gone. Before this, the booking would sit
+PENDING_PAYMENT with a captured charge behind it until its hold lapsed.
+
+P5 had already built the pull half of the channel for refunds, after the soak
+lost six of them to the 2% corrupt-signature branch. This adds the charge side,
+which is the one that actually matters for a customer: `settleAcceptedCharges`
+asks the provider about any charge accepted and unresolved for
+`CHARGE_POLL_AFTER_SECONDS`, and applies the answer through the same
+`payment_events` gate a webhook would. INV-4 fires from that path too, because
+the hold may well have lapsed while the webhook was being lost.
+
+Deliberately not polled: a PENDING payment with no charge id. That is the 10%
+transient-failure branch, where the customer saw the charge fail. Charging them
+afterwards because a retry would have worked is a surprise, not a repair.
+
+Proved with a test that parks a delivery for ten minutes and asserts the booking
+confirms anyway **and that no webhook for that charge was ever recorded** — the
+second half is what distinguishes "the poll worked" from "a delivery arrived
+after all". It takes 100 seconds, because it waits out the real configured
+threshold; a test that only passes against a shortened one would not be testing
+the deployment.
+
+**Unverified, and the reason is structural.** Nothing here has been deployed —
+Render is the human's to operate, and this repository only ever holds the local
+side. Two specific things could not be checked from here and are called out in
+the handoff: whether Render accepts `fromService`/`envVarKey` across two web
+services, and whether the free plan admits a second web service on this account.
+Both fail loudly at blueprint validation if wrong, and both have a stated
+fallback.
+
+**Also brought current:** the README's Known Issues still said payments were not
+built and that cancel returned `refund: null`, which stopped being true two
+phases ago. Stale documentation about what does not work is worse than none,
+because it is the part a reviewer trusts.

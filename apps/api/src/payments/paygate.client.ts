@@ -3,6 +3,7 @@ import { log } from '../common/logger';
 import type { Env } from '../config/env';
 import type {
   ChargeAccepted,
+  ChargeState,
   ChargeRequest,
   PaymentProvider,
   RefundAccepted,
@@ -79,32 +80,55 @@ export class PaygateClient implements PaymentProvider {
    * it, which is itself an answer worth having.
    */
   async getRefund(refundId: string): Promise<RefundState | null> {
+    const body = await this.get<{
+      id: string;
+      charge_id: string;
+      amount_minor: number;
+      status: 'processing' | 'succeeded';
+    }>(`/paygate/refunds/${refundId}`);
+
+    if (body === null) return null;
+
+    return {
+      refundId: body.id,
+      chargeId: body.charge_id,
+      amountMinor: BigInt(body.amount_minor),
+      status: body.status,
+    };
+  }
+
+  /** Read a charge's current state. Null if Paygate has no record of it. */
+  async getCharge(chargeId: string): Promise<ChargeState | null> {
+    const body = await this.get<{
+      id: string;
+      reference: string;
+      amount_minor: number;
+      status: 'processing' | 'succeeded' | 'failed';
+    }>(`/paygate/charges/${chargeId}`);
+
+    if (body === null) return null;
+
+    return {
+      chargeId: body.id,
+      reference: body.reference,
+      amountMinor: BigInt(body.amount_minor),
+      status: body.status,
+    };
+  }
+
+  private async get<T>(path: string): Promise<T | null> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
     try {
-      const response = await fetch(`${this.baseUrl}/paygate/refunds/${refundId}`, {
-        signal: controller.signal,
-      });
+      const response = await fetch(`${this.baseUrl}${path}`, { signal: controller.signal });
 
+      // 404 is an answer, not a failure: the provider has never heard of it.
       if (response.status === 404) return null;
       if (!response.ok) {
-        throw new BadGatewayException(`paygate refund lookup failed ${response.status}`);
+        throw new BadGatewayException(`paygate lookup ${path} failed ${response.status}`);
       }
-
-      const body = (await response.json()) as {
-        id: string;
-        charge_id: string;
-        amount_minor: number;
-        status: 'processing' | 'succeeded';
-      };
-
-      return {
-        refundId: body.id,
-        chargeId: body.charge_id,
-        amountMinor: BigInt(body.amount_minor),
-        status: body.status,
-      };
+      return (await response.json()) as T;
     } finally {
       clearTimeout(timer);
     }

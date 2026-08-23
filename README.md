@@ -27,19 +27,29 @@ against a deliberately unreliable provider, and honest documentation.
 | | URL |
 | --- | --- |
 | API | https://atrium-api-3p3j.onrender.com |
+| Paygate | *(filled in after the blueprint's first deploy)* |
 | Console | https://project-atrium.vercel.app |
 
 ```bash
 curl -s https://atrium-api-3p3j.onrender.com/health
 ```
 
-Two things a reviewer should know before trying these:
+Four things a reviewer should know before trying these:
 
-- **The API sleeps after 15 minutes idle.** The first request wakes it and takes
-  30–60 seconds. That is Render's free tier, not the application.
-- **The database is empty.** The seed script is P7, so there are no test logins
-  yet. `POST /auth/register` works today and creates a CUSTOMER; the five
-  role-based logins the brief asks for arrive with the seed.
+- **Both services sleep after 15 minutes idle.** The first request wakes them
+  and takes 30–60 seconds. That is Render's free tier, not the application.
+- **The deployed database is not seeded.** `POST /auth/register` works and
+  creates a CUSTOMER. The seed exists and runs against the local stack
+  (`pnpm seed`); it has not been run against the free-tier database.
+- **Paygate runs with chaos ON, as the brief specifies.** A `502` from
+  `POST /bookings/:id/pay` is its 10% transient-failure branch, not a bug —
+  retry the same booking and it cannot be charged twice, because the idempotency
+  key is derived from the booking id. A confirmation may also take a few seconds
+  to appear: the webhook is asynchronous, and 5% of deliveries are deliberately
+  parked for 60–90 seconds.
+- **`/paygate/_test/*` does not exist on the deployed instance.** Paygate
+  refuses to register its control surface when `NODE_ENV=production`. Forcing a
+  specific scenario is a local capability; see `pnpm e2e`.
 
 The deployed API runs **one** replica. The three-replica configuration is local
 only — see [Why three replicas](#why-three-replicas).
@@ -167,24 +177,24 @@ nginx/nginx.conf   round-robin LB over the three replicas
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
 
-**Current phase: P2 complete — booking core, seed, and the concurrency proof.**
+**Current phase: P5 complete — the whole system verified against a running
+stack.** All six invariants are demonstrated rather than argued: 69 offline
+tests, 24 tenant-isolation assertions, the 200-request concurrency proof, 21
+payment-integrity assertions and a three-minute chaos soak reconciling to zero.
+Transcripts are in [ARCHITECTURE.md](ARCHITECTURE.md), Appendices B–D.
+
+P5 found seven defects in code earlier phases had called complete, including one
+that meant the payment path had never worked at all. They are itemised in the P5
+entry of [PLAN.md](PLAN.md), which is the honest record of this project.
 
 The API is deployed on Render's free tier and the console on Vercel; both answer
 `/health`. **The deployed database is not seeded** — seeding runs against the
-local compose stack. Registering through `POST /auth/register` works on the
-deployed instance today.
+local compose stack.
 
 ### Not built yet
 
 Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 
-- **Payments.** `apps/api/src/payments/payment-provider.ts` defines the
-  interface and binds a provider that throws. Paygate itself boots and answers
-  `/health`; charges, refunds, webhook delivery and all six chaos behaviours are
-  P3, on a separate branch.
-- **Refund amounts.** `POST /bookings/:id/cancel` changes state and returns
-  `refund: null`. What the customer is owed is computed against the policy
-  snapshot in P3; returning a placeholder number would be worse than none.
 - **Frontend.** `apps/web` is a placeholder page. P6.
 - **Venue administration.** Nothing writes `venues.overbooking_buffer_pct`, so
   the room-side 422 for a non-zero buffer has no way to be triggered yet. P6.
@@ -196,13 +206,19 @@ Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 Stated separately from the above because these are gaps in *evidence*, not in
 features — the more expensive kind to leave undocumented.
 
-- **State machine unit tests.** The transition table is exercised end to end by
-  the proof and by manual probes, but there is no per-edge suite. Cut for time
-  in P2, scheduled for P5.
-- **The INV-6 negative suite.** `tests/authz` is still a stub. Isolation was
-  verified by hand — a `VENUE_ADMIN` at venue B requesting a booking at another
-  venue by valid UUID gets 404, and `GET /bookings` totals differ per admin —
-  but *verified by hand* is not *tested*. P5.
+- **CI runs 69 of 118 tests.** The offline suites and the route census run on
+  every push; the concurrency proof, the tenant-isolation probes, the
+  payment-integrity suite and the soak all need a compose stack CI does not
+  stand up. They run locally via `pnpm proof`, `pnpm authz`, `pnpm e2e` and
+  `pnpm soak`.
+- **The state machine's runtime edges are covered end to end, not per edge.**
+  The transition *table* is asserted exhaustively offline; the row lock, the
+  one-audit-row-per-transition rule and the 409 body are exercised by the proof
+  and the e2e suite rather than by a dedicated unit suite. Those need a real
+  Postgres.
+- **Nothing asserts the correlation id survives into the webhook path.** The
+  plumbing is there and Paygate echoes `X-Request-Id` on every delivery, but no
+  test follows one id from `/bookings/hold` through to the webhook and back.
 - **The proof has only been run against the `demo` profile** (25k bookings). It
   has not been run against `full` (250k), where the gist index is doing
   materially more work.
@@ -221,9 +237,26 @@ features — the more expensive kind to leave undocumented.
 - **The 15-minute turnaround applies to rooms only.** Equipment uses raw
   `starts_at`/`ends_at`, not the buffered `slot` column. A tripod handed back at
   14:00 is available at 14:00. ARCHITECTURE.md, Assumption 7.
-- **`GET /search` is cross-venue by design and is not tenant-scoped.** It
-  returns inventory — name, capacity, amenities, price — and no bookings,
-  customers or occupancy. ARCHITECTURE.md, Assumption 8.
+- **`GET /search` and `GET /rooms/:id/availability` are cross-venue by design.**
+  They return catalogue data — name, capacity, amenities, price, free/busy —
+  and no bookings, customers or occupancy. The INV-6 suite probes both for the
+  absence of booking ids, user ids and emails rather than for a denial.
+  ARCHITECTURE.md, Assumption 8.
+- **A payment cannot be re-attempted after a decline.** The charge idempotency
+  key is derived from the booking id, so `FAILED` is terminal and the customer
+  books again. That matches the brief's own state machine, which gives `FAILED`
+  no outgoing edge. DECISIONS.md, entry 1.
+- **Paygate keeps its state in memory.** Restarting it — routine on a sleeping
+  free tier — forgets every charge. The API treats “the provider has never heard
+  of this charge” as an answer and lets the hold expire; no money moved, so
+  nothing is lost.
+- **A webhook refused during a cold start is lost permanently.** Paygate does
+  not retry a delivery, by design — a retry would be a second source of
+  duplicates on top of the specified 30%. The API therefore polls the provider
+  for charge and refund outcomes it was never told about
+  (`CHARGE_POLL_AFTER_SECONDS`, `REFUND_POLL_AFTER_SECONDS`). Found by the P5
+  soak, which lost six refunds to the 2% corrupt-signature branch before this
+  existed.
 - **The 15-minute turnaround gap is a platform constant, not per-venue.** It is
   baked into a generated column, and a generated column cannot reference
   another table. Reasoning in ARCHITECTURE.md, Assumption 5.

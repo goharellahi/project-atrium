@@ -487,6 +487,59 @@ describe('a webhook with a bad signature is rejected, logged, and never processe
 });
 
 // ---------------------------------------------------------------------------
+// 4b. A capture whose webhook never arrives at all
+// ---------------------------------------------------------------------------
+
+describe('a charge whose webhook is lost is resolved by asking the provider', () => {
+  it('confirms the booking without ever receiving the delivery', async () => {
+    // Park the delivery for ten minutes. Nothing will deliver it inside this
+    // test, so the only route to CONFIRMED is the API asking Paygate directly.
+    //
+    // This is not a chaos scenario. It is the deployment: on Render's free tier
+    // the API sleeps after fifteen idle minutes and answers 502 while it wakes,
+    // and Paygate never retries a refused delivery. Without the poll the
+    // booking would sit PENDING_PAYMENT with a captured charge behind it until
+    // its hold lapsed.
+    await armDelay(600);
+
+    const hold = await createHold(world, 6, 72);
+    const payment = await pay(world, hold.id);
+    expect(payment.charge_id).toBeTruthy();
+
+    const before = await db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM webhook_deliveries WHERE charge_id = $1`,
+      [payment.charge_id],
+    );
+
+    // CHARGE_POLL_AFTER_SECONDS (100s) plus a drain tick, so allow generously.
+    await waitForStatus(db, hold.id, ['CONFIRMED'], 170_000);
+
+    // The proof that it was the poll and not a delivery: no webhook for this
+    // charge was ever recorded.
+    const after = await db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM webhook_deliveries WHERE charge_id = $1`,
+      [payment.charge_id],
+    );
+    expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
+
+    const settled = await db.query<{ status: string }>(
+      `SELECT status FROM payments WHERE booking_id = $1::uuid`,
+      [hold.id],
+    );
+    expect(settled.rows[0]!.status).toBe('SUCCEEDED');
+
+    // And the ledger records the effect once, so the parked delivery is
+    // absorbed rather than double-applied when it eventually fires.
+    const events = await db.query<{ n: string }>(
+      `SELECT COUNT(*)::text AS n FROM payment_events
+        WHERE charge_id = $1 AND event = 'charge.succeeded'`,
+      [payment.charge_id],
+    );
+    expect(events.rows[0]!.n).toBe('1');
+  }, 200_000);
+});
+
+// ---------------------------------------------------------------------------
 // 5. Reconciliation over the clean window
 // ---------------------------------------------------------------------------
 
