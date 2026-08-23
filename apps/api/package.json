@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "db:seed": "node dist/db/seed.js"
   },
   "dependencies": {
     "@nestjs/common": "11.2.1",
