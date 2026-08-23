@@ -113,6 +113,13 @@ Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 - **The 15-minute turnaround gap is a platform constant, not per-venue.** It is
   baked into a generated column, and a generated column cannot reference
   another table. Reasoning in ARCHITECTURE.md, Assumption 5.
+- **On Render, migrations run inside the start command, not as a pre-deploy
+  step.** `preDeployCommand` is a paid-tier feature — a free service is
+  rejected at blueprint validation. Chaining gives the same ordering (the
+  server never binds until migrations succeed, and a failure exits non-zero so
+  the deploy fails). It is safe only because that service runs a single
+  instance; `docker compose` keeps a separate one-shot `migrate` service
+  precisely because three replicas would race.
 - **`migrate` has no healthcheck** while every other compose service does. It
   is a one-shot container that exits; the replicas depend on it with
   `condition: service_completed_successfully`, which is the meaningful check.
