@@ -315,11 +315,103 @@ replicas and lands in P4.
 
 ## 4. Payment Integrity Model
 
-*Stub — P5. How exactly-once effect is achieved over Paygate's at-least-once,
-out-of-order channel; why the webhook handler is idempotent on business effect
-rather than deduplicated on delivery id; what happens to a webhook for an
-unknown charge; and the INV-4 sequence where a hold expires while payment is in
-flight.*
+Written in P4, and every claim in it verified in P5 against the running stack.
+Where P5 found the claim was false, that is recorded here rather than quietly
+corrected — see Appendix C.
+
+### Exactly-once effect from an at-least-once channel
+
+Two idempotency keys, both **derived**, never generated per attempt:
+
+| Key | Derivation | What it makes impossible |
+| --- | --- | --- |
+| Charge | `charge:<booking_id>` | Two charges for one booking, whatever the client retries |
+| Refund | `refund:<charge_id>` | Two refunds for one charge, however many paths decide one is owed |
+
+Both are written to `payments` and **committed before the provider is called**.
+A crash between the write and the HTTP call leaves a PENDING row carrying the
+key a retry will reuse — recoverable. The reverse order leaves a charge at the
+provider that this system has no record of, which is money lost silently.
+
+The client supplies no key at all. Accepting one would make INV-3 conditional on
+the client getting it right, and the brief treats client-side guarantees as
+absent.
+
+### Why the inbound side deduplicates on effect, not on delivery
+
+`payment_events` is `UNIQUE (charge_id, event)`, and applying an event is
+conditional on winning that insert. `webhook_deliveries.delivery_id` is also
+unique, but deduplicating on it would achieve nothing: Paygate mints a fresh
+delivery id on **every attempt**, so each redelivery of the same event looks
+new. The delivery id catches a retransmission of one delivery; the event ledger
+catches a redelivery of one event. Only the second is what INV-3 is about.
+
+Verified: three forced deliveries of one `charge.succeeded`, three distinct
+delivery ids, one `payment_events` row, one confirmation, one charge at the
+provider. Under the soak, 625 duplicate deliveries were absorbed this way in
+three minutes.
+
+### The handler does nothing heavy
+
+Verify → record → return 200, in two round trips to Postgres. The work happens
+afterwards, driven by `webhook_deliveries.processed_at IS NULL`.
+
+That separation is load bearing rather than tidy. Paygate retries on timeout, so
+a handler that confirmed a booking, resolved a policy and possibly issued a
+refund before answering would sometimes be slow enough to be retried —
+manufacturing exactly the duplicates the ledger exists to absorb, under load,
+when the system can least afford it.
+
+The queue is a **table** and not an in-memory array, because an in-memory queue
+loses everything a replica was holding when it died. A captured charge would
+then never reach its booking: money at the provider, nothing here, INV-5
+violated with no trace of why.
+
+### A webhook for a charge we have never heard of
+
+Neither 500ed (Paygate would retry forever) nor dropped (that loses a captured
+charge). The delivery is recorded with its `reference` — the booking id — and
+left unprocessed, so the drainer keeps retrying it and the reconciler reports it
+if it never resolves. When the cause is Paygate's 25% race-on-response branch,
+where the webhook beats the 202 that names the charge, the retry finds the
+`payments` row moments later and adopts the charge id onto it.
+
+### INV-4: the hold expires while payment is in flight
+
+The confirmation decision reads the booking under `FOR UPDATE` and confirms only
+a live, unexpired hold. There is no branch that confirms an expired hold because
+the customer paid — the slot may already belong to someone else, and a double
+booking is a worse outcome than a refund.
+
+Anything else is refunded automatically under the derived refund key, and the
+sequence is audited:
+
+```
+hold.created                          DRAFT           -> HELD
+payment.initiated                     HELD            -> PENDING_PAYMENT
+hold.expired.payment_arrived_late     PENDING_PAYMENT -> EXPIRED
+refund.initiated.unconfirmable_hold   EXPIRED         =  EXPIRED
+refund.settled.terminal_booking       EXPIRED         =  EXPIRED
+```
+
+The booking stays EXPIRED. That state is terminal and money moving does not
+resurrect it; the audit rows are where the settlement is recorded.
+
+### The channel can lose a message permanently, so the system also pulls
+
+Paygate corrupts 2% of delivery signatures and never retries a delivery. Those
+are correctly rejected with 401 — and the business effect they carried is then
+lost for good. The soak lost six refunds that way: money genuinely returned,
+`refund_id` recorded from the synchronous 202, `payments.status` stuck on
+SUCCEEDED forever.
+
+So the drainer also **asks**. Any refund the provider accepted and has not
+reported on within `REFUND_POLL_AFTER_SECONDS` is looked up directly, and the
+answer applied through the same `payment_events` gate a webhook would use.
+
+It does not mark a payment REFUNDED merely because a refund id exists. Accepted
+is not settled, and assuming otherwise would model a provider that does not
+exist — the same mistake `payment-provider.ts` was written in P2 to avoid.
 
 The provider half is built (P3, `apps/paygate/`). Full detail —
 env vars, the six chaos behaviours, how to force a scenario, a worked signature
@@ -594,3 +686,284 @@ equipment hold failing looks, from the outside, like the admission check
 rejecting everything — a plausible INV-2 story — when the actual fault was in
 how one parameter was bound. The `5xx responses` assertion is what separated
 the two.
+
+---
+
+## Appendix B — The proof under repetition (P5)
+
+Appendix A's run passed, and it was run **once**. P5 ran it eight times in a row,
+and the difference is the whole point of this appendix.
+
+### What repetition found
+
+```
+run 1   5xx responses 0
+run 2   5xx responses 0
+run 3   5xx responses 0
+run 4   5xx responses 0
+run 5   5xx responses 59        <- 500 x28, 504 x31
+```
+
+Postgres had logged **227 deadlocks** across those runs. The invariants never
+broke — INV-1 still admitted exactly one booking, INV-2 still capped at three
+units — but a caller got a 500 where a 409 belongs, which is its own fail
+condition (CLAUDE.md hard rule 3). Appendix A had even named this as the thing
+`5xx responses 0` existed to rule out. It simply never rolled the die enough
+times.
+
+### Mechanism
+
+200 concurrent inserts of the same range into a gist exclusion index do not
+queue politely. Each inserter finds a conflicting in-progress tuple and waits on
+that transaction's xid; with enough of them the waits form cycles, and Postgres
+breaks a cycle by aborting one side — **after `deadlock_timeout`, which defaults
+to one full second**.
+
+```
+ERROR:  deadlock detected
+DETAIL: Process 1279 waits for ShareLock on transaction 1402; blocked by process 1288.
+        Process 1288 waits for ShareLock on transaction 1403; blocked by process 1279.
+WHERE:  while checking exclusion constraint on tuple (582,5) in relation "bookings"
+```
+
+A second of lock wait per deadlock, spread across a 20-connection pool, is what
+produced `timeout exceeded when trying to connect` (the 500s) and nginx's
+30-second `proxy_read_timeout` (the 504s).
+
+### The fix that made it worse first
+
+The obvious response — retry the transaction on a class-40 abort — was tried
+first, with a 10–30 ms exponential backoff. Measured:
+
+| Configuration | 5xx across 5 consecutive runs |
+| --- | --- |
+| No retry | 0, 0, 0, 0, 59 |
+| Retry x4, 10–30 ms backoff | 170, 54, 64, 20, 0 |
+
+Retrying made it dramatically worse, and the reason is worth keeping: a retrying
+request holds its pool connection through *another* contended transaction, so a
+4-attempt budget multiplies queue depth on a 20-connection pool. **The retry has
+to be shorter than the transaction it is retrying, or it becomes the load.**
+
+### The fix that worked
+
+A transaction-scoped advisory lock on the room, taken before the insert:
+
+```sql
+SELECT pg_advisory_xact_lock(4771, hashtext($room_id))
+```
+
+This is **not** a correctness mechanism and must not be read as one.
+`no_room_overlap` still decides every admission; removing this line changes
+throughput, not outcomes. It replaces a free-for-all with a total order, so no
+cycle can form — and a contender arriving after the winner commits hits a
+*committed* conflicting row and gets its 23P01 immediately instead of a second
+later. Different rooms hash to different keys and never queue behind each other.
+The two-argument advisory lock space does not collide with the single-argument
+locks the hold sweeper uses.
+
+The bounded retry stays as a safety net, with a 2–6 ms backoff and a budget in
+`TRANSIENT_RETRY_ATTEMPTS`, because a deadlock is not a rejection: `23P01` means
+"taken" and is a final answer, `40P01` means "ask me again" and says nothing at
+all about the slot. Exhausting the budget is a 409 — sustained deadlocking on
+one slot *is* contention.
+
+### After
+
+Eight consecutive runs, 3,200 requests:
+
+```
+run 1..8   5xx responses 0   (all 5 assertions passing in every run)
+deadlocks logged by postgres over the whole sequence: 0
+```
+
+The canonical run, at the default configuration:
+
+```
+-- INV-1: same room, same one-hour slot --------------------------------
+  responses        201 x1, 409 x199
+  replica spread   api1=67 api2=66 api3=67
+
+-- INV-1 re-read from Postgres ----------------------------------------
+  active bookings overlapping the slot: 1
+
+-- INV-2: 200 distinct rooms, 1 unit each, 3 units owned ----------
+  responses        201 x3, 409 x197
+  admitted         3 (ceiling 3)
+
+-- INV-2 re-read from Postgres ----------------------------------------
+  units_owned                    3
+  peak concurrent usage          3
+
+-- run summary --------------------------------------------------------
+  total requests   400
+  5xx responses    0
+  replicas seen    api1, api2, api3
+  per replica      api1=133 api2=135 api3=132
+```
+
+---
+
+## Appendix C — Payment integrity, verified (P5)
+
+P4 shipped the payment path unrun. P5 ran it, and the first thing it found was
+that **none of it worked**.
+
+### The bug that made the whole payment path inert
+
+```
+{"level":"error","replica":"api1","deliveryRowId":"2121aedf-...",
+ "err":"\"[object Object]\" is not valid JSON","msg":"webhook.drain.item_failed"}
+```
+
+`webhook_deliveries.raw_body` was declared `jsonb` and the handler wrote the raw
+body string into it. Drizzle hands a string to the driver as a jsonb literal and
+parses jsonb back on read, so the column returned an object; `JSON.parse` of
+`String(object)` threw on **every** delivery. Nothing was ever confirmed, no
+refund was ever issued, and all three replicas retried the same six rows every
+ten seconds indefinitely.
+
+The type was wrong on principle as well. The column holds the exact bytes an
+HMAC covers, and jsonb normalises key order, whitespace and number formatting —
+precisely what a signature is computed over. The P4 comment above the column
+said exactly that, and then chose jsonb anyway. It is `text` now (migration
+0004).
+
+### The bug only an ordering assertion could find
+
+`audit_events.occurred_at` defaulted to `now()`, which is the **transaction
+start time** and identical for every row that transaction writes. INV-4's expiry
+and its refund come from one worker transaction, so ordering by
+`(occurred_at, id)` fell through to a random UUID and reported the refund before
+the expiry about half the time — describing a sequence that never happened.
+`clock_timestamp()` now (migration 0005). A test asserting only that both rows
+exist would still pass today.
+
+### Deterministic scenarios
+
+Chaos stays **on**. Every scenario forces its own case through Paygate's
+`_test/deliver` and `_test/delay`, because a duplicate fires 30% of the time and
+a late delivery 5%, and a test that waits for either is a coin flip wearing an
+assertion. Natural duplicates and delays land in the middle of these tests
+anyway — absorbing them is the point.
+
+```
+happy path: hold -> pay -> webhook -> CONFIRMED -> cancel -> refund
+    total_minor 15000  =  room 10000 + equipment 5000
+    cancelled at >48h  -> tier 48, room 10000, equipment 5000, total 15000
+    double-clicked cancel -> 409, and Paygate shows exactly 1 refund
+INV-3: 3 forced deliveries, 3 delivery ids, 1 payment_events row, 1 charge,
+       re-pay returns outcome=replayed with the same charge id
+INV-4: delivery parked, hold expired, capture arrives -> EXPIRED not CONFIRMED,
+       refund key refund:<charge_id>, exactly 1 refund at the provider,
+       audit order expiry-before-refund asserted explicitly
+bad signature -> 401, recorded signature_valid=false, effect never applied,
+                 charge_id NOT recorded because the body was never parsed
+raw-byte verification: same object, one extra space -> 401
+unknown charge -> 200, reference persisted, left unprocessed for the drainer
+INV-5 -> 0 discrepancies, then exactly 1 unmatched_delivery once an orphan
+         webhook is posted
+
+Tests  20 passed (20)
+```
+
+The last pair matters most: the report returns zero, and then returns exactly one
+when something real is wrong. A reconciler that cannot go non-zero is not
+evidence of anything.
+
+### The chaos soak — the honest INV-5 test
+
+Three minutes of real traffic, chaos on, **no** `_test` endpoints touched, hold
+TTL shortened to 45 s so abandoned holds actually lapse while a payment is in
+flight.
+
+```
+-- soak traffic ------------------------------------------------------
+  hold TTL observed   45s
+  holds created       2157
+  holds rejected 4xx  5756
+  paid                1547
+  pay failed (5xx)    180      <- Paygate's 10% transient branch, surfaced as 502
+  cancelled           477
+  abandoned at hold   430
+  unexpected 5xx      0
+
+-- deliveries --------------------------------------------------------
+  applied              2012
+  duplicate_effect     625
+  invalid_signature    62
+
+-- reconciliation ----------------------------------------------------
+  discrepancies  0
+  by kind        {}
+  totals         {"captured_minor":"20235000","refunded_minor":"7330000",
+                  "confirmed_bookings":"968","settled_payments":"1523"}
+```
+
+### What the soak found on its first run
+
+Twelve discrepancies — six refunds, each reported twice:
+
+```
+  by kind {"capture_without_confirmation":6,"refund_initiated_not_settled":6}
+```
+
+The money had gone back. Paygate had issued every one of those refunds and
+returned a refund id synchronously. What never arrived was the
+`refund.succeeded` webhook, because 2% of deliveries have their signature
+corrupted and Paygate never retries a delivery — so the API correctly answered
+401, and the settlement was lost for good.
+
+Two changes came out of it. The drainer now polls the provider for refunds it
+accepted and never reported on, applying the answer through the same
+`payment_events` gate (see section 4). And the report splits
+`refund_initiated_not_settled` — no refund id, no evidence the provider was ever
+reached — from `refund_accepted_not_settled`, where the provider has the money
+and simply never said so. Reporting both under one name is what made the first
+soak result unreadable.
+
+This is the case for running the thing. No amount of reading would have produced
+those six rows.
+
+---
+
+## Appendix D — Tenant isolation, verified (P5)
+
+The INV-6 suite, against three replicas behind nginx. 24 assertions, and two of
+them were passing for the wrong reason until P5 ran them.
+
+**The fixture promoted nobody.** Users were registered with mixed-case labels
+(`adminA`), and `POST /auth/register` lowercases the address before storing it,
+so `UPDATE users ... WHERE email = $3` matched zero rows — a perfectly
+successful UPDATE as far as Postgres is concerned. Every principal stayed a
+CUSTOMER, and every cross-venue probe was denied because the caller had no venue
+at all, not because tenant isolation works. The role assertion at the end of
+`makePrincipal` caught it; a `rowCount` check now names the cause at the point
+it happens.
+
+**The policy probe never reached the code it was probing.** It sent a single
+72-hour tier and got a 422, correctly, because `TiersSchema` refuses a ladder a
+cancellation could fall off the end of. The request was rejected before the
+`venue_id` in its body could do anything, so the test was exercising its own
+validation and proving nothing about scoping.
+
+```
+✓ VENUE_ADMIN / VENUE_STAFF of A denied on B: GET /bookings/:id,
+  POST /bookings/:id/{checkout,cancel,pay}, GET /equipment-types/:id   (10)
+✓ the write probes did not mutate venue B          (rows re-read from Postgres)
+✓ GET /bookings and GET /equipment-types for A contain no venue B row
+✓ PUT /venues/cancellation-policy carrying B's venue_id changes only A
+✓ GET /admin/reconciliation: 403 for VENUE_ADMIN, 200 for PLATFORM_ADMIN
+✓ availability and search for B carry no booking id, user id or email
+✓ hold with A's room and B's equipment -> 422, and creates nothing
+✓ a CUSTOMER cannot read another customer's booking
+✓ a PLATFORM_ADMIN reads both venues        (the positive control)
+✓ unauthenticated -> 401
+✓ every route listed as probed was actually requested
+
+Tests  24 passed (24)
+```
+
+The route census — the half that runs in CI with no stack — enumerates every
+route the controllers register and fails if one is neither probed nor exempt
+with a written reason. 13 routes registered, 8 probed, 5 exempt.
