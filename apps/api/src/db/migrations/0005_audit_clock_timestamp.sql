@@ -1,0 +1,25 @@
+-- ---------------------------------------------------------------------------
+-- 0005 — audit_events.occurred_at defaults to clock_timestamp(), not now().
+--
+-- `now()` is the TRANSACTION start time, and it is identical for every
+-- statement in that transaction. Every audit row written by one transaction
+-- therefore carried exactly the same occurred_at, and the trail could not be
+-- put back in order.
+--
+-- That is not a cosmetic problem. INV-4 requires the sequence "hold expired,
+-- then money refunded" to be RECORDED, and both of those rows are written by
+-- one transaction in the webhook worker. Ordering by (occurred_at, id) fell
+-- through to a random UUID, so the trail reported the refund before the expiry
+-- roughly half the time — describing a sequence of events that never happened.
+--
+-- Found in P5 by asserting on the order rather than on the presence of the
+-- rows. A test that only checked both rows exist would still pass today.
+--
+-- clock_timestamp() reads the wall clock at each statement, so rows are
+-- ordered within a transaction as well as across them. Existing rows keep the
+-- transaction timestamp they were written with; nothing is back-filled,
+-- because inventing an order for history would be worse than admitting it was
+-- not recorded.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE "audit_events" ALTER COLUMN "occurred_at" SET DEFAULT clock_timestamp();

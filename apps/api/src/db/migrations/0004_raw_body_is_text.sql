@@ -1,0 +1,24 @@
+-- ---------------------------------------------------------------------------
+-- 0004 — webhook_deliveries.raw_body becomes text.
+--
+-- It was jsonb, and that was wrong twice over.
+--
+-- Functionally: Drizzle passes a string straight through to the driver as a
+-- jsonb literal, so Postgres parsed the raw body, stored a normalised object,
+-- and returned an object on read. `JSON.parse(String(row.raw_body))` then threw
+-- `"[object Object]" is not valid JSON` and EVERY webhook delivery failed to
+-- apply — nothing confirmed, nothing refunded, three replicas retrying the same
+-- rows forever. P4 shipped this; P5's first end-to-end run found it.
+--
+-- On principle: the column holds the exact bytes an HMAC was computed over.
+-- jsonb normalises key order, whitespace and number formatting, which are
+-- precisely what the signature covers. A column that reformats signed bytes
+-- destroys the only evidence that can settle a signature dispute.
+--
+-- The USING clause is the default jsonb -> text cast. Rows written before this
+-- migration were already normalised on the way in, so nothing is recoverable
+-- for them and nothing pretends otherwise; they simply come back as the
+-- normalised JSON text they became.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE "webhook_deliveries" ALTER COLUMN "raw_body" SET DATA TYPE text;

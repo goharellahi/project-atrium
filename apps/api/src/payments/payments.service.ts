@@ -350,9 +350,9 @@ export class PaymentsService {
         reference: input.reference,
         event: input.event,
         signatureValid: input.signatureValid,
-        // Stored as a JSON string, not a parsed object: the parsed form is a
-        // lossy re-encoding of what was actually signed, and when a signature
-        // dispute happens the exact bytes are the only useful evidence.
+        // The exact bytes, in a text column. The parsed form is a lossy
+        // re-encoding of what was signed, and when a signature dispute happens
+        // those bytes are the only useful evidence.
         rawBody: input.raw,
         error: input.error,
         processedAt: input.processedAt,
@@ -402,7 +402,9 @@ export class PaymentsService {
 
     if (!delivery || delivery.processedAt !== null) return null;
 
-    const body = JSON.parse(String(delivery.rawBody)) as WebhookBody;
+    // `raw_body` is text — the exact bytes received. See the schema comment for
+    // why it must not be jsonb, and what broke when it was.
+    const body = JSON.parse(delivery.rawBody) as WebhookBody;
     const chargeId = asString(body.charge_id);
     const event = asString(body.event);
     const reference = asString(body.reference);
