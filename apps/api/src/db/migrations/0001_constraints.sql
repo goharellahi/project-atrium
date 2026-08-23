@@ -32,9 +32,25 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 -- moving the buffer out of the constraint and back into application logic,
 -- which is precisely the thing this design exists to avoid. Recorded as an
 -- assumption in ARCHITECTURE.md.
+--
+-- NOTE ON THE ROUND TRIP THROUGH UTC.
+-- The obvious spelling, `ends_at + interval '15 minutes'`, is REJECTED by
+-- Postgres with "generation expression is not immutable". Adding an interval to
+-- a timestamptz calls timestamptz_pl_interval, which is only STABLE: for
+-- day-or-larger intervals the result depends on the session TimeZone across a
+-- DST boundary, so Postgres will not allow it in a STORED generated column even
+-- though 15 minutes could never be affected.
+--
+-- Converting to a naive timestamp at a FIXED zone, adding there, and converting
+-- back is immutable, because every step is pinned to UTC and nothing consults
+-- the session setting. The arithmetic is identical for a fixed-length interval.
 ALTER TABLE bookings ADD COLUMN slot tstzrange
   GENERATED ALWAYS AS (
-    tstzrange(starts_at, ends_at + interval '15 minutes', '[)')
+    tstzrange(
+      starts_at,
+      ((ends_at AT TIME ZONE 'UTC') + interval '15 minutes') AT TIME ZONE 'UTC',
+      '[)'
+    )
   ) STORED;
 --> statement-breakpoint
 

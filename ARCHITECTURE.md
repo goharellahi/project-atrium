@@ -202,6 +202,92 @@ that relied on the sweeper alone. The in-transaction expiry closes the window;
 the sweeper exists so expired holds are released promptly for *availability
 queries* and reporting, not only when someone happens to contend the slot.
 
+### One correction to this draft, found while building it (P1)
+
+The migration as originally specified did not run. Postgres rejected it:
+
+```
+ERROR:  generation expression is not immutable
+```
+
+`ends_at + interval '15 minutes'` calls `timestamptz_pl_interval`, which is
+only **STABLE**, not IMMUTABLE — for day-or-larger intervals the result depends
+on the session `TimeZone` across a DST boundary. Postgres will not allow a
+merely-stable expression in a `STORED` generated column, even though 15 minutes
+could never be affected by it.
+
+The fix is to pin the arithmetic to a fixed zone, which makes every step
+immutable while computing the identical value for a fixed-length interval:
+
+```sql
+tstzrange(
+  starts_at,
+  ((ends_at AT TIME ZONE 'UTC') + interval '15 minutes') AT TIME ZONE 'UTC',
+  '[)'
+)
+```
+
+Nothing about the strategy changes — the buffer is still inside the enforced
+interval, still enforced by the same constraint as the overlap rule. Only the
+spelling changed. Recorded here rather than silently corrected, per the brief's
+instruction to leave both versions in and note what changed.
+
+### Verification transcript (P1)
+
+Run against `postgres:16-alpine` with `0000` and `0001` applied to an empty
+database. Full script: `apps/api/src/db/migrations/` plus the fixtures shown.
+
+```
+=== TEST 1: two overlapping HELD bookings for the same room ===
+INSERT 0 1
+--- first insert above should succeed; second below must fail 23P01 ---
+ERROR:  conflicting key value violates exclusion constraint "no_room_overlap"
+DETAIL:  Key (room_id, slot)=(2222..., ["2026-09-01 09:30:00+00","2026-09-01 10:45:00+00"))
+         conflicts with existing key (room_id, slot)=(2222..., ["2026-09-01 09:00:00+00","2026-09-01 10:15:00+00")).
+
+=== TEST 2: turnaround buffer. Existing booking ends 10:00. ===
+--- 10:10 start must be REJECTED (inside the 15-minute gap) ---
+ERROR:  conflicting key value violates exclusion constraint "no_room_overlap"
+DETAIL:  Key (room_id, slot)=(2222..., ["2026-09-01 10:10:00+00","2026-09-01 11:15:00+00"))
+         conflicts with existing key (room_id, slot)=(2222..., ["2026-09-01 09:00:00+00","2026-09-01 10:15:00+00")).
+--- 10:15 start must be ACCEPTED (exactly at the gap boundary) ---
+INSERT 0 1
+
+=== TEST 3: a CANCELLED booking must not block its old slot ===
+UPDATE 1
+INSERT 0 1
+
+=== TEST 4: audit_events is append only ===
+INSERT 0 1
+--- UPDATE must be rejected by the trigger ---
+ERROR:  audit_events is append only
+CONTEXT:  PL/pgSQL function audit_events_immutable() line 2 at RAISE
+--- DELETE must be rejected by the trigger ---
+ERROR:  audit_events is append only
+CONTEXT:  PL/pgSQL function audit_events_immutable() line 2 at RAISE
+
+=== TEST 5: role/venue coherence CHECK ===
+--- VENUE_ADMIN with NULL venue_id must be rejected ---
+ERROR:  new row for relation "users" violates check constraint "users_venue_scope_ck"
+--- CUSTOMER with a venue_id must be rejected ---
+ERROR:  new row for relation "users" violates check constraint "users_venue_scope_ck"
+
+=== FINAL STATE: surviving bookings and their enforced slots ===
+    id    |       starts_at        |        ends_at         |                        slot                         |  status
+----------+------------------------+------------------------+-----------------------------------------------------+-----------
+ aaaaaaaa | 2026-09-01 09:00:00+00 | 2026-09-01 10:00:00+00 | ["2026-09-01 09:00:00+00","2026-09-01 10:15:00+00") | CANCELLED
+ aaaaaaaa | 2026-09-01 09:00:00+00 | 2026-09-01 10:00:00+00 | ["2026-09-01 09:00:00+00","2026-09-01 10:15:00+00") | HELD
+ aaaaaaaa | 2026-09-01 10:15:00+00 | 2026-09-01 11:00:00+00 | ["2026-09-01 10:15:00+00","2026-09-01 11:15:00+00") | HELD
+```
+
+Note the `slot` values in the final row set: a booking that *ends* at 10:00
+occupies the enforced interval up to 10:15. That is the turnaround buffer being
+carried by the constraint rather than by application code.
+
+This is single-connection evidence that the rule is correct. It is **not** the
+concurrency proof — that requires 200 simultaneous requests across three
+replicas and lands in P4.
+
 ---
 
 ## 4. Payment Integrity Model
@@ -276,6 +362,23 @@ every collision is a constraint violation and a wasted round trip — and at
 seed therefore walks each room's calendar forward deterministically, emitting
 slots that cannot overlap by construction, and varies density per room instead
 of varying times randomly.
+
+**5. The 15-minute turnaround is a platform constant, not per-venue.** The
+brief lists it under a venue's operating rules, which could be read as
+per-venue. It is implemented as a platform constant because it is baked into
+the `bookings.slot` generated column, and a generated column cannot reference
+another table. Making it per-venue would mean moving the buffer out of the
+constraint and back into application logic — reintroducing exactly the
+query-then-check race the design exists to eliminate. If a venue genuinely
+needed a different gap, the correct change is a second generated column per
+buffer size or a per-venue partial constraint, not an application check.
+
+**6. A cross-venue read returns 404, not 403.** The brief accepts "a 403 or
+404, and never data". 404 is chosen because 403 confirms the row exists: a
+VENUE_ADMIN of Venue A probing UUIDs could distinguish "exists but not yours"
+from "no such booking" and enumerate another venue's identifiers. The cost is
+worse ergonomics for legitimate users, who cannot tell a typo from a
+permissions problem. Accepted.
 
 ---
 

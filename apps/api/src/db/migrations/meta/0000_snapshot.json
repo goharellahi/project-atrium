@@ -271,7 +271,7 @@
           "primaryKey": false,
           "notNull": false,
           "generated": {
-            "as": "tstzrange(starts_at, ends_at + interval '15 minutes', '[)')",
+            "as": "tstzrange(starts_at, ((ends_at AT TIME ZONE 'UTC') + interval '15 minutes') AT TIME ZONE 'UTC', '[)')",
             "type": "stored"
           }
         },

@@ -214,7 +214,7 @@ export const bookings = pgTable('bookings', {
    * write to it; Postgres rejects writes to a generated column.
    */
   slot: tstzrange('slot').generatedAlwaysAs(
-    sql`tstzrange(starts_at, ends_at + interval '15 minutes', '[)')`,
+    sql`tstzrange(starts_at, ((ends_at AT TIME ZONE 'UTC') + interval '15 minutes') AT TIME ZONE 'UTC', '[)')`,
   ),
 
   status: bookingStatus('status').notNull().default('DRAFT'),
