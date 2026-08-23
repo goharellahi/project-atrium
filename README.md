@@ -124,6 +124,12 @@ Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 - **`migrate` has no healthcheck** while every other compose service does. It
   is a one-shot container that exits; the replicas depend on it with
   `condition: service_completed_successfully`, which is the meaningful check.
+- **`output: 'standalone'` is scoped to the Docker build.** It exists so the
+  runtime image can `node server.js` without pnpm. Vercel does its own
+  packaging, so the flag is disabled when `VERCEL` is set. `apps/web/vercel.json`
+  deliberately carries no `installCommand` or `buildCommand`: Vercel detects the
+  pnpm workspace from the repo root itself, and overriding install broke its
+  Next.js version detection.
 - **Local Node is 22, the pin is 26.** Containers use `node:26-alpine`, so
   compose and CI are on the pinned runtime. Only host-side `pnpm` commands run
   on 22.
