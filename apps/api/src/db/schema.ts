@@ -381,6 +381,20 @@ export const webhookDeliveries = pgTable('webhook_deliveries', {
    * destroys the only evidence that settles a signature dispute.
    */
   rawBody: text('raw_body').notNull(),
+  /**
+   * The inbound X-Request-Id this delivery arrived with.
+   *
+   * The Tier-2 correlation requirement is a chain, not a header: a client's id
+   * reaches the API, the API forwards it to Paygate on the charge, Paygate
+   * stores it against that charge and echoes it on every webhook it sends for
+   * it, and the API adopts it again on the way back in. Every link existed
+   * before this column; none of them was observable anywhere but a log line, so
+   * nothing could assert the chain held. This is the place to look.
+   *
+   * NULL is meaningful and stays possible: a delivery posted straight at the
+   * API with no X-Request-Id has nothing upstream to inherit from.
+   */
+  correlationId: text('correlation_id'),
   receivedAt: timestamp('received_at', { withTimezone: true })
     .notNull()
     .defaultNow(),

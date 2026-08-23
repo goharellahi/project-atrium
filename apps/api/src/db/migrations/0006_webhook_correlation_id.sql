@@ -1,0 +1,26 @@
+-- ---------------------------------------------------------------------------
+-- 0006 — webhook_deliveries.correlation_id.
+--
+-- The correlation id already travelled the whole path: nginx sets X-Request-Id,
+-- the API's CorrelationMiddleware adopts it, PaygateClient forwards it on the
+-- charge, Paygate stores it against the charge and echoes it as X-Request-Id on
+-- every webhook delivery for that charge. What was missing was any place to
+-- LOOK. The id existed only in log lines, so "the correlation id survives into
+-- the webhook path" could be read in a log but not asserted by a test — which
+-- is exactly why P5 left that box unticked.
+--
+-- Persisting it on the delivery row makes the claim checkable: a test can send
+-- its own X-Request-Id on POST /bookings/:id/pay and then read the same value
+-- off the webhook_deliveries row Paygate's callback produced, with no log
+-- scraping in between.
+--
+-- Nullable, and it stays nullable. A delivery posted straight at the API with
+-- no X-Request-Id header — which is what a bad-signature or unknown-charge test
+-- does — has no inbound id to inherit, and inventing one would make the column
+-- lie about provenance. NULL means "nothing upstream named this request", and
+-- that is a true statement worth being able to make.
+--
+-- Existing rows are not back-filled for the same reason.
+-- ---------------------------------------------------------------------------
+
+ALTER TABLE "webhook_deliveries" ADD COLUMN IF NOT EXISTS "correlation_id" text;

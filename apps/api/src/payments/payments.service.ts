@@ -22,7 +22,7 @@ import {
 import { log } from '../common/logger';
 import type { Env } from '../config/env';
 import type { AuthPrincipal } from '../common/context/request-context';
-import { getCorrelationId } from '../common/context/request-context';
+import { getContext, getCorrelationId } from '../common/context/request-context';
 import { withTransientRetry } from '../common/retry-transaction';
 import {
   BookingStateMachine,
@@ -354,6 +354,12 @@ export class PaymentsService {
         // re-encoding of what was signed, and when a signature dispute happens
         // those bytes are the only useful evidence.
         rawBody: input.raw,
+        // The id this delivery arrived under, taken from the ambient request
+        // context rather than from a parameter, because that is the same value
+        // the middleware put on the response and into every log line for this
+        // request. Reading the header again here would be a second source that
+        // could disagree with the first.
+        correlationId: inboundCorrelationId(),
         error: input.error,
         processedAt: input.processedAt,
       })
@@ -1354,4 +1360,20 @@ function isUuid(value: string): boolean {
 
 function cryptoRandom(): string {
   return Math.random().toString(16).slice(2) + Date.now().toString(16);
+}
+
+/**
+ * The correlation id for the request currently being served, or `null`.
+ *
+ * `getCorrelationId()` returns the sentinel `'no-context'` when called outside
+ * a request, and `randomUUID()` is what the middleware substitutes when no
+ * X-Request-Id arrived. Neither is a correlation id that came from upstream, so
+ * neither is worth storing: the column's whole value is that a non-NULL entry
+ * means some caller really did name this request. Only an id that was actually
+ * present on the inbound webhook survives to the row.
+ */
+function inboundCorrelationId(): string | null {
+  const ctx = getContext();
+  if (!ctx) return null;
+  return ctx.inheritedCorrelationId ? ctx.correlationId : null;
 }
