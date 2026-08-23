@@ -31,6 +31,8 @@ x-api-base: &api-base
     HOLD_SWEEPER_INTERVAL_SECONDS: ${HOLD_SWEEPER_INTERVAL_SECONDS:-15}
     PAYGATE_BASE_URL: http://paygate:9000
     PAYGATE_SECRET: ${PAYGATE_SECRET:-dev-paygate-hmac-secret}
+    PAYGATE_TIMEOUT_MS: ${PAYGATE_TIMEOUT_MS:-8000}
+    WEBHOOK_DRAIN_INTERVAL_SECONDS: ${WEBHOOK_DRAIN_INTERVAL_SECONDS:-10}
   depends_on:
     postgres:
       condition: service_healthy
@@ -154,9 +156,17 @@ services:
       PAYGATE_PORT: 9000
       PAYGATE_SECRET: ${PAYGATE_SECRET:-dev-paygate-hmac-secret}
       PAYGATE_CHAOS: ${PAYGATE_CHAOS:-on}
+      # The brief's name. P3 shipped Paygate accepting PAYGATE_WEBHOOK_URL as an
+      # alias only because this file, owned by another phase, used the wrong
+      # one; that alias is now unused here and the brief's spelling wins.
+      #
       # Paygate calls back through the load balancer, not a single replica, so
-      # a webhook may land on a different replica than the one that charged.
-      PAYGATE_WEBHOOK_URL: ${PAYGATE_WEBHOOK_URL:-http://nginx:8080/webhooks/paygate}
+      # a webhook may land on a different replica than the one that charged —
+      # which is exactly the case INV-3 has to survive.
+      PAYGATE_CALLBACK_URL: ${PAYGATE_CALLBACK_URL:-http://nginx:8080/webhooks/paygate}
+      # Without a seed the stack runs on Paygate's default and every chaos
+      # branch is unreproducible, which makes a failed run undebuggable.
+      PAYGATE_SEED: ${PAYGATE_SEED:-atrium-local}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
     ports:
       - "${PAYGATE_PORT:-9000}:9000"
