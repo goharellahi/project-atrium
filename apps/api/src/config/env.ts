@@ -31,13 +31,20 @@ const EnvSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
 
-  // Booking rules. Unused in P1 — validated here so a bad value fails the
-  // deploy rather than the first hold.
+  // Booking rules. See ARCHITECTURE.md Assumption 1 for why the 8-minute TTL
+  // and the 10-minute checkout guarantee are two separate numbers.
   HOLD_TTL_SECONDS: z.coerce.number().int().positive().default(480),
   CHECKOUT_REARM_SECONDS: z.coerce.number().int().positive().default(600),
   MAX_HOLD_REARMS: z.coerce.number().int().nonnegative().default(2),
   MAX_HOLD_LIFETIME_SECONDS: z.coerce.number().int().positive().default(1800),
   ROOM_TURNAROUND_MINUTES: z.coerce.number().int().nonnegative().default(15),
+
+  /**
+   * How often each replica ATTEMPTS a hold sweep. All three try; a Postgres
+   * advisory lock elects one per tick, so this is a per-replica attempt
+   * interval, not a per-cluster sweep interval. See HoldSweeper.
+   */
+  HOLD_SWEEPER_INTERVAL_SECONDS: z.coerce.number().int().positive().default(30),
 
   PAYGATE_BASE_URL: z.string().url().optional(),
   PAYGATE_SECRET: z.string().optional(),
