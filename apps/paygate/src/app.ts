@@ -5,6 +5,7 @@ import { planFor, type ChaosPlan } from './chaos.js';
 import type { PaygateConfig } from './config.js';
 import { Deliverer, type DeliveryRequest } from './delivery.js';
 import { Store } from './store.js';
+import { registerTestRoutes } from './test-routes.js';
 import type { Charge, Refund, WebhookEvent } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -478,6 +479,9 @@ export function buildApp(cfg: PaygateConfig): PaygateApp {
       deliveries: (charge?.deliveries ?? []).filter((d) => d.refund_id === refund.id),
     };
   });
+
+  // Outside the brief's spec, and off when PAYGATE_TEST_ENDPOINTS=off.
+  if (cfg.testEndpoints) registerTestRoutes(app, cfg, store, deliverer);
 
   app.addHook('onClose', async () => {
     deliverer.close();
