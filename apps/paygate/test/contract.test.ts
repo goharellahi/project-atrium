@@ -375,7 +375,7 @@ describe('the test control surface', () => {
   });
 
   it('can be switched off entirely', async () => {
-    const off = await startHarness({ testEndpoints: false });
+    const off = await startHarness({ testEndpoints: false, testEndpointsRequested: false });
     try {
       const res = await off.app.inject({
         method: 'POST',
@@ -385,6 +385,24 @@ describe('the test control surface', () => {
       expect(res.statusCode).toBe(404);
     } finally {
       await off.stop();
+    }
+  });
+
+  it('does not register under NODE_ENV=production, even when asked for', async () => {
+    // The routes forge signed webhooks and take no auth. In production they
+    // should not exist at all, so nobody reading the route table has to work
+    // out whether they are scaffolding or an oversight.
+    const prod = await startHarness({ production: true, testEndpointsRequested: true });
+    try {
+      for (const url of ['/paygate/_test/deliver', '/paygate/_test/delay']) {
+        const res = await prod.app.inject({ method: 'POST', url, payload: { charge_id: 'ch_x' } });
+        expect(res.statusCode).toBe(404);
+      }
+      // The rest of the provider is unaffected.
+      const health = await prod.app.inject({ method: 'GET', url: '/health' });
+      expect(health.json()).toMatchObject({ status: 'ok', test_endpoints: 'off' });
+    } finally {
+      await prod.stop();
     }
   });
 });

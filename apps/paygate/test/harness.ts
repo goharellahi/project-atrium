@@ -81,6 +81,8 @@ export function testConfig(overrides: Partial<PaygateConfig> = {}): PaygateConfi
     chaos: false,
     seed: 'test-seed',
     callbackUrl: null,
+    production: false,
+    testEndpointsRequested: true,
     testEndpoints: true,
     declineAmountMinor: 666,
     deliveryTimeoutMs: 5000,

@@ -34,8 +34,24 @@ const EnvSchema = z.object({
   PAYGATE_CALLBACK_URL: z.url().optional(),
   PAYGATE_WEBHOOK_URL: z.url().optional(),
 
-  /** The /paygate/_test/* control surface. Outside the brief's spec. */
+  /**
+   * The /paygate/_test/* control surface. Outside the brief's spec.
+   *
+   * Requested, not granted: production refuses it regardless. See `NODE_ENV`.
+   */
   PAYGATE_TEST_ENDPOINTS: onOff.default('on'),
+
+  /**
+   * `production` hard-disables the /_test/* routes, even with
+   * PAYGATE_TEST_ENDPOINTS=on.
+   *
+   * Not a security control — Paygate is a test double and holds no real money.
+   * It is a legibility control: a reviewer reading a production route table
+   * should never have to work out whether an unauthenticated endpoint that
+   * forges signed webhooks is scaffolding or an oversight. In production it is
+   * not there to ask about.
+   */
+  NODE_ENV: z.string().default('development'),
 
   /**
    * Deterministic decline trigger: a charge for exactly this amount always
@@ -57,6 +73,11 @@ export type PaygateConfig = {
   chaos: boolean;
   seed: string;
   callbackUrl: string | null;
+  /** True when NODE_ENV is exactly `production`. */
+  production: boolean;
+  /** What PAYGATE_TEST_ENDPOINTS asked for, before production overrode it. */
+  testEndpointsRequested: boolean;
+  /** The effective answer: requested AND not production. */
   testEndpoints: boolean;
   declineAmountMinor: number;
   deliveryTimeoutMs: number;
@@ -72,13 +93,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PaygateConfig 
     throw new Error(`Invalid Paygate environment — ${detail}`);
   }
   const e = parsed.data;
+  const production = e.NODE_ENV === 'production';
+  const testEndpointsRequested = e.PAYGATE_TEST_ENDPOINTS === 'on';
   return {
     port: e.PAYGATE_PORT,
     secret: e.PAYGATE_SECRET,
     chaos: e.PAYGATE_CHAOS === 'on',
     seed: e.PAYGATE_SEED,
     callbackUrl: e.PAYGATE_CALLBACK_URL ?? e.PAYGATE_WEBHOOK_URL ?? null,
-    testEndpoints: e.PAYGATE_TEST_ENDPOINTS === 'on',
+    production,
+    testEndpointsRequested,
+    testEndpoints: testEndpointsRequested && !production,
     declineAmountMinor: e.PAYGATE_DECLINE_AMOUNT_MINOR,
     deliveryTimeoutMs: e.PAYGATE_DELIVERY_TIMEOUT_MS,
     logLevel: e.LOG_LEVEL,

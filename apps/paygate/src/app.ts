@@ -95,6 +95,10 @@ export function buildApp(cfg: PaygateConfig): PaygateApp {
   const store = new Store();
   const deliverer = new Deliverer(cfg, app.log, store);
 
+  // Computed once and used for both registration and /health, so health can
+  // never report a control surface that is not actually mounted.
+  const testRoutesEnabled = cfg.testEndpoints && !cfg.production;
+
   if (!cfg.callbackUrl) {
     app.log.warn(
       'paygate has no callback url — set PAYGATE_CALLBACK_URL (or PAYGATE_WEBHOOK_URL); every delivery will be recorded as skipped',
@@ -209,7 +213,7 @@ export function buildApp(cfg: PaygateConfig): PaygateApp {
     chaos: cfg.chaos ? 'on' : 'off',
     seed: cfg.seed,
     callback_url_configured: cfg.callbackUrl !== null,
-    test_endpoints: cfg.testEndpoints ? 'on' : 'off',
+    test_endpoints: testRoutesEnabled ? 'on' : 'off',
     charges: store.charges.size,
     refunds: store.refunds.size,
   }));
@@ -480,8 +484,17 @@ export function buildApp(cfg: PaygateConfig): PaygateApp {
     };
   });
 
-  // Outside the brief's spec, and off when PAYGATE_TEST_ENDPOINTS=off.
-  if (cfg.testEndpoints) registerTestRoutes(app, cfg, store, deliverer);
+  // Outside the brief's spec. Off when PAYGATE_TEST_ENDPOINTS=off, and refused
+  // outright under NODE_ENV=production — the check is repeated here, at the
+  // point of registration, so the guard is visible where a reviewer looks for
+  // it rather than only in config.ts.
+  if (testRoutesEnabled) {
+    registerTestRoutes(app, cfg, store, deliverer);
+  } else if (cfg.production && cfg.testEndpointsRequested) {
+    app.log.warn(
+      'PAYGATE_TEST_ENDPOINTS=on was ignored: the /paygate/_test/* control surface does not register under NODE_ENV=production',
+    );
+  }
 
   app.addHook('onClose', async () => {
     deliverer.close();
