@@ -18,6 +18,19 @@ const EnvSchema = z.object({
 
   REPLICA_ID: z.string().default('unknown'),
 
+  /**
+   * Apply migrations during boot, before the server binds.
+   *
+   * Off by default. docker compose leaves it off and uses the one-shot
+   * `migrate` service instead, because three replicas migrating concurrently
+   * would race. Render turns it on: the free tier has no pre-deploy hook, no
+   * shell access, and runs a single instance.
+   */
+  RUN_MIGRATIONS_ON_BOOT: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+
   // Booking rules. Unused in P1 — validated here so a bad value fails the
   // deploy rather than the first hold.
   HOLD_TTL_SECONDS: z.coerce.number().int().positive().default(480),

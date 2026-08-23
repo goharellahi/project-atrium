@@ -37,24 +37,32 @@ services:
     dockerfilePath: ./apps/api/Dockerfile
     dockerContext: .
     healthCheckPath: /health
-    # Migrations run as part of the container command, NOT via preDeployCommand.
+    # Migrations run inside the Node process at boot, gated on
+    # RUN_MIGRATIONS_ON_BOOT below — NOT via preDeployCommand and NOT via
+    # dockerCommand.
     #
-    # preDeployCommand is a paid-tier feature; a free service is rejected at
-    # blueprint validation with "pre-deploy command is not supported for free
-    # tier services". Chaining into the start command is the free-tier
-    # equivalent and has the same ordering guarantee: the server never binds
-    # until migrations have succeeded, and a failed migration exits non-zero so
-    # the deploy fails instead of serving against a stale schema.
+    # preDeployCommand is paid-tier only: the blueprint is rejected with
+    # "pre-deploy command is not supported for free tier services".
     #
-    # Safe here only because this service runs a single instance. Three replicas
-    # each running this on boot would race; that is why docker-compose keeps the
-    # separate one-shot `migrate` service instead. If numInstances ever rises
-    # above 1, this must move back to a pre-deploy step or a one-shot job.
+    # dockerCommand does not go through a shell. Render treats the whole string
+    # as one executable name, so `sh -c "a && b"` fails at runtime with
+    # `sh: node dist/db/migrate.js && node dist/main.js: not found` and the
+    # container exits 127. Shell chaining is simply not available here.
     #
-    # Note this also re-runs on every cold start after the free tier sleeps.
-    # Applied migrations are recorded in drizzle's journal, so the re-run is two
-    # queries and a no-op — it adds a little to the 30-60s wake time, nothing more.
-    dockerCommand: sh -c "node dist/db/migrate.js && node dist/main.js"
+    # Doing it in Node needs no shell, no script file and no chmod, and avoids
+    # the CRLF trap that a committed .sh would hit on a Windows checkout.
+    # Ordering is unchanged: the server does not bind until migrations succeed,
+    # and a failure rejects the boot so the deploy fails rather than serving
+    # against a stale schema.
+    #
+    # Safe only because this service runs a single instance. docker-compose
+    # keeps its separate one-shot `migrate` service, because three replicas
+    # each migrating on boot would race. If numInstances ever rises above 1,
+    # this flag must go back off and migrations move to a one-shot job.
+    #
+    # Also re-runs on every cold start after the free tier sleeps. Applied
+    # migrations are recorded in drizzle's journal, so that is two queries and
+    # a no-op.
     envVars:
       - key: NODE_ENV
         value: production
@@ -66,6 +74,8 @@ services:
         value: info
       - key: REPLICA_ID
         value: render-1
+      - key: RUN_MIGRATIONS_ON_BOOT
+        value: "true"
       - key: DATABASE_URL
         fromDatabase:
           name: atrium-db

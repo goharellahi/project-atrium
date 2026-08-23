@@ -3,11 +3,19 @@ import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { logger } from './common/logger';
 import { loadEnv } from './config/env';
+import { runMigrations } from './db/migrate';
 
 async function bootstrap(): Promise<void> {
   // Validated before Nest starts, so a bad environment is a failed boot rather
   // than a runtime surprise on the first request.
   const env = loadEnv();
+
+  // Before the server binds, never after. A replica that accepts traffic
+  // against a stale schema is worse than one that fails to start: the failure
+  // is visible, the stale schema is not.
+  if (env.RUN_MIGRATIONS_ON_BOOT) {
+    await runMigrations(env.DATABASE_URL);
+  }
 
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
   app.enableShutdownHooks();
