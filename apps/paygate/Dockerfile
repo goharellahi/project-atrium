@@ -2,7 +2,9 @@
 FROM node:26-alpine AS base
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
-RUN corepack enable
+# node:26-alpine no longer ships corepack — it was removed from the Node
+# distribution. Install the pinned pnpm directly.
+RUN npm install -g pnpm@10.33.0
 
 FROM base AS deps
 WORKDIR /repo

@@ -34,6 +34,8 @@ x-api-base: &api-base
   depends_on:
     postgres:
       condition: service_healthy
+    migrate:
+      condition: service_completed_successfully
   healthcheck:
     test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3001/health"]
     interval: 10s
@@ -75,6 +77,25 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s
+    networks: [atrium]
+
+  # One-shot. Runs to completion before any replica starts, so three replicas do
+  # not race each other applying the same migrations.
+  migrate:
+    image: atrium-api:local
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    container_name: atrium-migrate
+    restart: "no"
+    command: ["node", "dist/db/migrate.js"]
+    environment:
+      NODE_ENV: ${NODE_ENV:-development}
+      DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:-atrium}@postgres:5432/${POSTGRES_DB:-atrium}
+      LOG_LEVEL: ${LOG_LEVEL:-debug}
+    depends_on:
+      postgres:
+        condition: service_healthy
     networks: [atrium]
 
   api1:
