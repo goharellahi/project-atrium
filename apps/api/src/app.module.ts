@@ -4,6 +4,10 @@ import { DbModule } from './db/db.module';
 import { AuthModule } from './auth/auth.module';
 import { HealthModule } from './health/health.module';
 import { BookingsModule } from './bookings/bookings.module';
+import { PaymentsModule } from './payments/payments.module';
+import { PoliciesModule } from './policies/policies.module';
+import { EquipmentModule } from './equipment/equipment.module';
+import { AdminModule } from './admin/admin.module';
 import { CorrelationMiddleware } from './common/context/correlation.middleware';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -19,7 +23,16 @@ import { VenueScopeGuard } from './common/guards/venue-scope.guard';
  * can find it.
  */
 @Module({
-  imports: [DbModule, AuthModule, HealthModule, BookingsModule],
+  imports: [
+    DbModule,
+    AuthModule,
+    HealthModule,
+    BookingsModule,
+    PaymentsModule,
+    PoliciesModule,
+    EquipmentModule,
+    AdminModule,
+  ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: RolesGuard },

@@ -115,19 +115,50 @@ integrity work lands separately once the booking core exists.
 
 **API — payment integrity** (not this branch)
 
-- [ ] Webhook handler idempotent **on business effect**, via
-      `payment_events UNIQUE (charge_id, event)` (**INV-3**)
-- [ ] Bad signature → 401, logged, never processed
-- [ ] Webhook for an unknown charge neither 500s nor is silently dropped
-- [ ] Fast webhook path, no heavy work inline; choice explained
-- [ ] Expired hold + successful payment → automatic refund, recorded (**INV-4**)
-- [ ] Cancellation with data-driven refund policy; policy snapshot at
-      confirmation; refunds idempotent
-- [ ] Reconciliation endpoint proving **INV-5**, zero discrepancies
+- [x] Webhook handler idempotent **on business effect**, via
+      `payment_events UNIQUE (charge_id, event)` (**INV-3**) — *P4*
+- [x] Bad signature → 401, logged, never processed — *P4*
+- [x] Webhook for an unknown charge neither 500s nor is silently dropped — *P4*
+- [x] Fast webhook path, no heavy work inline; choice explained — *P4*
+- [x] Expired hold + successful payment → automatic refund, recorded (**INV-4**)
+      — *P4*
+- [x] Cancellation with data-driven refund policy; policy snapshot at
+      confirmation; refunds idempotent — *P4*
+- [x] Reconciliation endpoint proving **INV-5**, zero discrepancies — *P4*
+
+> **Landed on `feat/p4-payments-integrity`**, not on `feat/p3-payments-paygate`.
+> P3's branch had already merged with the provider only; opening it again for
+> the API half would have made one branch span two phases of history.
 
 ---
 
-## P4 — The concurrency proof · `feat/p4-concurrency-proof`
+## P4 — API payment integrity and the authz suite · `feat/p4-payments-integrity`
+
+> **Renumbered.** The concurrency proof that P4 originally held was delivered in
+> P2 (below). P4 became the API half of payments plus the negative test P2 cut —
+> the two things standing between the project and two of its three hard caps.
+
+- [x] **INV-6 negative suite** in `tests/authz` *(cut from P2, was scheduled P5)*
+- [x] Route census: a registered route must be probed or exempt with a reason
+- [x] `POST /bookings/:id/pay` — HELD only, unexpired, row before provider call
+- [x] `POST /webhooks/paygate` over the raw body, HMAC verified before parsing
+- [x] Worker applying `charge.succeeded`, `charge.failed`, `refund.succeeded`
+- [x] Policy snapshot frozen onto the booking at confirmation
+- [x] `GET`/`PUT /venues/cancellation-policy` — policy overridable, no deploy
+- [x] `GET /equipment-types` and `/equipment-types/:id`, venue-scoped
+- [x] `GET /admin/reconciliation` — seven discrepancy classes, PLATFORM_ADMIN
+- [x] Refund calculator unit tests, every tier boundary *(pulled from P5)*
+- [x] State machine transition table tests *(cut from P2, pulled from P5)*
+- [x] `docker-compose.yml`: `PAYGATE_CALLBACK_URL` and a pinned `PAYGATE_SEED`
+- [ ] **Nothing in this phase has been run against a live stack.** Typecheck,
+      build and the 29 offline unit tests pass; the payment path, the INV-6
+      probes and the DI graph are unverified. First action of the next session.
+- [ ] One end-to-end happy path driven through `/paygate/_test/deliver` and
+      `/_test/delay` — cut for time, moves to P5
+
+---
+
+## P4 (original) — The concurrency proof · delivered in P2
 
 > **Delivered early, in P2.** The proof is what says whether the hold path is
 > correct, so writing it in the same phase as the hold path was the only way to
@@ -148,10 +179,12 @@ integrity work lands separately once the booking core exists.
 
 ## P5 — Tests and observability · `feat/p5-tests-observability`
 
-- [ ] Unit tests over the state machine, every failure edge *(cut from P2)*
-- [ ] **INV-6 negative suite** in `tests/authz` *(cut from P2)*
-- [ ] Unit tests over the refund calculator, every tier boundary
-- [ ] One end-to-end happy path
+- [x] Unit tests over the state machine transition table *(cut from P2, done P4)*
+- [x] **INV-6 negative suite** in `tests/authz` *(cut from P2, done P4)*
+- [x] Unit tests over the refund calculator, every tier boundary *(done P4)*
+- [ ] Unit tests over the state machine's *runtime* edges — the row lock, one
+      audit row per transition, the 409 body. Needs a real Postgres.
+- [ ] One end-to-end happy path *(cut from P4)*
 - [ ] Correlation id surviving into the webhook path, proven by a test
 - [ ] CI green with the full suite
 
@@ -180,7 +213,8 @@ integrity work lands separately once the booking core exists.
 
 ## P8 — Final documents · `docs/p8-final`
 
-- [ ] `DECISIONS.md` — 8–15 entries: choice, rejected alternative, trade-off
+- [~] `DECISIONS.md` — 8 entries written in P4 as the decisions were made; the
+      P0–P2 ones still live in `ARCHITECTURE.md` §3 and §7 and fold in here
 - [ ] `AI_LOG.md` — what was delegated, where the agent was wrong or naive
 - [ ] `TIMELINE.md` — hour by hour, what was cut, why
 - [ ] `ARCHITECTURE.md` stubs completed: ERD, state machine, payment integrity,
@@ -198,7 +232,7 @@ integrity work lands separately once the booking core exists.
       console itself is P6
 - [x] `README.md` (stub with Known Issues; final pass in P8)
 - [ ] `ARCHITECTURE.md` — all required sections
-- [ ] `DECISIONS.md`
+- [~] `DECISIONS.md` — started in P4, completed in P8
 - [ ] `AI_LOG.md`
 - [ ] `TIMELINE.md`
 - [ ] `LOAD_TEST.md`
@@ -417,3 +451,82 @@ until venue administration exists in P6.
 **Deliberately not built:** any payment logic. `payments/payment-provider.ts`
 defines the interface and binds a provider that throws; P3 owns the client on
 its own branch.
+
+### 2026-08-23 — P4: payment integrity and the required negative test
+
+The API half of payments, and the `tests/authz` suite P2 cut. Two of the
+brief's three hard caps were sitting open; both are now closed in code.
+
+**The authz suite is built around not trusting itself.** The realistic way to
+breach cross-venue isolation is not a broken endpoint written today — it is a
+correct-looking one added in P6 that nobody remembers to cover. So the suite
+reads the API's controller decorators and fails if a registered route is
+neither probed nor listed as exempt *with a written reason*. That half needs no
+stack and runs in CI on every push; a guard that only fires under
+`docker compose up` would not have fired. The probes close the other end: each
+records itself, and the run fails if a route claimed as covered was never
+actually requested.
+
+Three assertions in there are worth keeping because the obvious version of the
+test would have missed them:
+
+1. **The body, not the status.** A 403 whose message names the room has still
+   leaked it. Every denial is checked against every identifier belonging to the
+   other tenant.
+2. **The rows, not the response.** A denial that nonetheless performed the write
+   passes every status assertion, so venue B's bookings are re-read from
+   Postgres afterwards.
+3. **Availability and search are probed for what they must not carry, not for a
+   denial.** Cross-venue reads there are a Tier-1 requirement. The line is
+   free/busy intervals yes, booking and customer identifiers no. Classifying
+   them as "exempt" would have been the easy call and the wrong one.
+
+**Two design calls on the payment path.**
+
+1. **The charge key is derived from the booking id, not supplied by the
+   client.** `charge:<booking_id>`, persisted and committed before Paygate is
+   called. A client that retries with a fresh key, a stale key, or none at all
+   still cannot be charged twice — the alternative makes INV-3 depend on the
+   client getting it right. The cost is real and accepted: a declined booking
+   cannot be re-attempted under a new charge, because FAILED is terminal and the
+   customer rebooks. The refund key is derived the same way from the charge id,
+   which is what makes the INV-4 automatic refund and a double-clicked cancel
+   converge on one refund even if they race.
+
+2. **The webhook queue is a table, not an array.** `webhook_deliveries.
+   processed_at IS NULL` is the queue; the handler records and returns, and the
+   work is drained by a kick plus an advisory-lock-elected sweep. An in-memory
+   queue loses everything a replica was holding when it died, and a captured
+   charge would then never reach its booking — money at the provider, nothing
+   here, INV-5 violated with no trace of why. It is also what makes the
+   race-on-response branch self-healing: a delivery that arrives before its own
+   payments row stays unprocessed and is retried, rather than being 500ed
+   (Paygate retries forever) or dropped (money lost).
+
+**Contradiction with an earlier decision, recorded rather than smoothed over.**
+`payment-provider.ts` was written in P2 saying P3 would bind the real client on
+`feat/p3-payments-paygate`. It did not: P3's branch shipped the provider only
+and merged, so the API half landed here on `feat/p4-payments-integrity`. The
+P2 comment is now wrong about the branch name. Left as-is rather than rewritten,
+per CLAUDE.md — the sequence is the record.
+
+**Cut, and not hidden:** the end-to-end happy path driven through Paygate's
+`/_test/deliver` and `/_test/delay`. That is the test that would turn INV-3 and
+INV-4 from designed-for into demonstrated, and it is the single highest-value
+thing left. It moves to P5.
+
+**The honest limitation: none of this has been run.** Typecheck passes, the API
+builds, and 29 offline unit tests pass — the refund calculator at every tier
+boundary from both sides, and the transition table exhaustively over the full
+N × N product. But the stack was never brought up this phase, so the payment
+path, the INV-6 probes and the Nest DI graph after the `StateMachineModule`
+extraction are all unverified against a running system. Every previous phase in
+this project found its real bugs by running it rather than by reasoning about
+it, and there is no reason to think this one is different. Verifying it is the
+first action of the next session, not an afterthought.
+
+Also fixed, since this phase owned the file: `docker-compose.yml` set
+`PAYGATE_WEBHOOK_URL` where the brief says `PAYGATE_CALLBACK_URL`, and passed
+no `PAYGATE_SEED` — so the stack ran on Paygate's default and no chaos branch
+was reproducible, which is precisely what the per-decision seeding in P3 was
+built to provide.

@@ -460,12 +460,20 @@ nothing in the brief asks for, cutting effective fleet capacity for no stated
 reason. The asymmetry is deliberate and is the reason the two mechanisms read
 different columns.
 
-**8. Cross-venue search is not an INV-6 exception.** (P2.) `GET /search` returns
-rooms from every venue and is not tenant-scoped. Tenant isolation protects a
-venue's bookings, customers and revenue — not the existence of its rooms, which
-is precisely the catalogue a marketplace exists to publish. Nothing operational
-crosses a venue boundary on that endpoint: no booking, no customer, no
-occupancy. The isolation tests target the endpoints that do carry that data.
+**8. Catalogue data is cross-venue; tenant data is not. INV-6 constrains the
+second set only.** (P2, drawn explicitly in P4.) The system holds two kinds of
+data and they have different boundaries. **Catalogue data** — rooms, equipment
+types, rates, capacities, amenities and free/busy availability — is
+intentionally readable across venues, because cross-venue search is a Tier 1
+requirement and a customer is not a venue-scoped user: a marketplace whose
+customers can only see one venue's calendar is not a marketplace. **Tenant
+data** — bookings, customers, reports, revenue and cancellation policy — is
+venue-scoped and returns 404 across the boundary. INV-6 is a statement about
+the second set. The line between them is *who*, not *what*: an endpoint that
+says a slot is taken is catalogue, and an endpoint that says who has it is
+tenant data. `GET /search` and `GET /rooms/:id/availability` sit on the
+catalogue side and are tested for that — the INV-6 suite probes them not for a
+denial but for the absence of any booking id, user id or email in the response.
 
 **9. An expired hold is never revived.** (P2.) Checkout refuses to re-arm a hold
 whose `expires_at` has passed, and expires it properly on the way out rather

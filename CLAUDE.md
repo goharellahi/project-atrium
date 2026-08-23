@@ -249,10 +249,17 @@ never be committed. Do not quote the brief at length in committed files.
 
 ## Current phase
 
-**P2 — booking core. Complete, including the 200-request concurrency proof
-(delivered early; transcript in `ARCHITECTURE.md` Appendix A) and the seed
-script (pulled forward from P7).**
-Next: **P3 — paygate and payment integrity**, on `feat/p3-payments-paygate`.
+**P4 — API payment integrity and the required negative test. Code complete on
+`feat/p4-payments-integrity`, NOT yet run against a live stack.** Pay, webhook
+ingest over the raw body, the delivery worker (INV-3, INV-4), cancellation
+policy as data, reconciliation (INV-5), and the `tests/authz` INV-6 suite with
+its route census.
+
+Next, in order: **bring the stack up and verify P4** — typecheck, build and 29
+offline unit tests pass, but the payment path, the INV-6 probes and the DI graph
+after the `StateMachineModule` extraction have not been exercised. Then **P5 —
+the end-to-end happy path** through Paygate's `/_test/deliver` and `/_test/delay`,
+which is what turns INV-3 and INV-4 from designed-for into demonstrated.
 
 See `PLAN.md` for the full phase list and the progress log.
 

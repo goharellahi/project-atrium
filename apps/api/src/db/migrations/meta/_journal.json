@@ -15,6 +15,20 @@
       "when": 1787449058043,
       "tag": "0001_constraints",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1787461619297,
+      "tag": "0002_payments_refunds",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1787461620297,
+      "tag": "0003_default_cancellation_policy",
+      "breakpoints": true
     }
   ]
 }

@@ -14,6 +14,7 @@
     "up": "docker compose up --build",
     "down": "docker compose down -v",
     "proof": "pnpm --filter @atrium/tests-concurrency proof",
+    "authz": "pnpm --filter @atrium/tests-authz authz",
     "seed": "pnpm --filter @atrium/api db:seed"
   },
   "devDependencies": {

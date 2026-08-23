@@ -19,6 +19,7 @@ import {
 } from './bookings.schemas';
 import { zodBody } from '../common/pipes/zod-validation.pipe';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
+import { PaymentsService } from '../payments/payments.service';
 import type { AuthPrincipal } from '../common/context/request-context';
 
 /**
@@ -30,7 +31,10 @@ import type { AuthPrincipal } from '../common/context/request-context';
  */
 @Controller('bookings')
 export class BookingsController {
-  constructor(private readonly bookings: BookingsService) {}
+  constructor(
+    private readonly bookings: BookingsService,
+    private readonly payments: PaymentsService,
+  ) {}
 
   /**
    * Create a hold.
@@ -87,14 +91,25 @@ export class BookingsController {
     @CurrentUser() principal: AuthPrincipal,
   ) {
     const booking = await this.bookings.cancel(id, body, principal);
+
+    // The state transition commits first, then the money moves. Ordered this
+    // way because a refund that fails must not leave the booking un-cancelled:
+    // the customer asked to cancel, the slot must be released to someone else
+    // immediately, and an unsettled refund is a discrepancy the reconciliation
+    // report will surface rather than a reason to keep the room held.
+    //
+    // Idempotent by construction. The refund key is derived from the charge id,
+    // so a double-clicked cancel — the second click getting a 409 from the
+    // state machine and never reaching here — and a retry that does reach here
+    // both converge on one refund at the provider.
+    const refund = await this.payments.settleCancellation(booking.id);
+
     return {
       id: booking.id,
       status: booking.status,
-      // Refund amount is deliberately absent. Cancellation changes state in
-      // this phase; what the customer is owed is computed against the policy
-      // snapshot in P3, and returning a placeholder number here would be worse
-      // than returning none.
-      refund: null,
+      // Null when there is nothing to give back: a hold that was never paid
+      // for, or a booking already refunded.
+      refund,
     };
   }
 
