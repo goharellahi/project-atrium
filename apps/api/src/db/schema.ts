@@ -286,6 +286,26 @@ export const payments = pgTable('payments', {
   chargeId: text('charge_id').unique(),
   amountMinor: bigint('amount_minor', { mode: 'bigint' }).notNull(),
   status: paymentStatus('status').notNull().default('PENDING'),
+
+  /**
+   * The refund half, added in P4.
+   *
+   * `refund_idempotency_key` is derived deterministically from the charge id
+   * (`refund:<charge_id>`) rather than generated per attempt. That is what
+   * makes the INV-4 automatic refund and the double-clicked cancel converge on
+   * one refund: whichever replica gets there, and however many times it tries,
+   * Paygate sees the same key and issues the same refund. A per-attempt key
+   * would refund twice and INV-5 would then find money it could not account
+   * for.
+   */
+  refundId: text('refund_id').unique(),
+  refundIdempotencyKey: text('refund_idempotency_key').unique(),
+  refundedMinor: bigint('refunded_minor', { mode: 'bigint' })
+    .notNull()
+    .default(sql`0`),
+  /** Why the charge failed or was refunded. Read by the reconciliation report. */
+  failureReason: text('failure_reason'),
+
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
     .defaultNow(),
@@ -330,6 +350,18 @@ export const webhookDeliveries = pgTable('webhook_deliveries', {
   id: uuid('id').primaryKey().defaultRandom(),
   deliveryId: text('delivery_id').notNull().unique(),
   chargeId: text('charge_id'),
+  /**
+   * The booking id, as Paygate echoes it back.
+   *
+   * Kept even — especially — when the charge is unknown to us. That is the 25%
+   * race-on-response branch: the webhook can arrive before the 202 that names
+   * the charge, so `charge_id` matches no `payments` row yet. Dropping such a
+   * delivery loses a captured charge; 500ing on it makes Paygate retry forever.
+   * Persisting the reference means the reconciler can still tie the money to a
+   * booking, and the processor can re-attempt it once the payments row lands.
+   */
+  reference: text('reference'),
+  event: text('event'),
   signatureValid: boolean('signature_valid').notNull(),
   rawBody: jsonb('raw_body').notNull(),
   receivedAt: timestamp('received_at', { withTimezone: true })
