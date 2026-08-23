@@ -213,7 +213,8 @@ integrity work lands separately once the booking core exists.
 
 ## P8 — Final documents · `docs/p8-final`
 
-- [ ] `DECISIONS.md` — 8–15 entries: choice, rejected alternative, trade-off
+- [~] `DECISIONS.md` — 8 entries written in P4 as the decisions were made; the
+      P0–P2 ones still live in `ARCHITECTURE.md` §3 and §7 and fold in here
 - [ ] `AI_LOG.md` — what was delegated, where the agent was wrong or naive
 - [ ] `TIMELINE.md` — hour by hour, what was cut, why
 - [ ] `ARCHITECTURE.md` stubs completed: ERD, state machine, payment integrity,
@@ -231,7 +232,7 @@ integrity work lands separately once the booking core exists.
       console itself is P6
 - [x] `README.md` (stub with Known Issues; final pass in P8)
 - [ ] `ARCHITECTURE.md` — all required sections
-- [ ] `DECISIONS.md`
+- [~] `DECISIONS.md` — started in P4, completed in P8
 - [ ] `AI_LOG.md`
 - [ ] `TIMELINE.md`
 - [ ] `LOAD_TEST.md`
