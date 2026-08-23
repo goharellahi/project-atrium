@@ -1,0 +1,24 @@
+{
+  "name": "@atrium/paygate",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Paygate — the deliberately unreliable mock payment provider, built to the brief's spec (§06).",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "node --watch src/server.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "fastify": "5.12.1",
+    "pino": "10.3.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "26.0.0",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

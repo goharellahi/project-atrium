@@ -1,0 +1,20 @@
+{
+  "name": "project-atrium",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Atrium — studio booking platform. Rooms as interval exclusion, equipment as concurrent-usage capacity.",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "up": "docker compose up --build",
+    "down": "docker compose down -v"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3"
+  }
+}

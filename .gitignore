@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# CONFIDENTIAL — the assessment brief must never be committed.
+# The repository is public; .brief/ is marked "Confidential - Do not redistribute".
+# Do not remove this entry.
+# ---------------------------------------------------------------------------
+.brief/
+*.pdf
+
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+out/
+.next/
+*.tsbuildinfo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+logs/
+
+# Test / coverage output
+coverage/
+.vitest/
+*.lcov
+
+# Load test output
+tests/load/results/
+*.k6.json
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Local docker volumes
+.docker-data/

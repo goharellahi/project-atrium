@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   Design tokens. Tailwind 4 CSS-first configuration — there is no
+   tailwind.config.js. These values are fixed by DESIGN.md; change that file
+   first, then this one.
+   --------------------------------------------------------------------------- */
+@theme {
+  /* Neutral ramp: stone, not zinc. */
+  --color-bg: var(--color-stone-50);
+  --color-surface: #ffffff;
+  --color-border: var(--color-stone-200);
+  --color-fg: var(--color-stone-900);
+  --color-fg-muted: var(--color-stone-500);
+
+  /* Single accent: amber. */
+  --color-accent: var(--color-amber-500);
+  --color-accent-fg: var(--color-stone-950);
+
+  /* 4px radius everywhere. */
+  --radius: 4px;
+
+  /* Base 14px; 13px inside tables. */
+  --text-base: 0.875rem;
+  --text-table: 0.8125rem;
+
+  /* Compact rows for an operations console. */
+  --spacing-row: 32px;
+
+  /* Data font — booking IDs, timestamps, money. */
+  --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
+
+  /* Hairline borders, no card shadows. */
+  --shadow-card: none;
+}
+
+html {
+  font-size: 100%;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-size: var(--text-base);
+}

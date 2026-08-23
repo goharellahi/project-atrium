@@ -1,0 +1,10 @@
+{
+  "name": "@atrium/tests-load",
+  "version": "0.0.0",
+  "private": true,
+  "description": "k6 load scripts. k6 runs from the grafana/k6 docker image, not npm.",
+  "scripts": {
+    "test": "node -e \"console.log('k6 scripts run via docker; see tests/load/README.md')\"",
+    "k6": "docker run --rm -i --network=host -v \"$PWD/scripts:/scripts\" grafana/k6 run"
+  }
+}
