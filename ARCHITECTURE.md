@@ -298,6 +298,53 @@ rather than deduplicated on delivery id; what happens to a webhook for an
 unknown charge; and the INV-4 sequence where a hold expires while payment is in
 flight.*
 
+The provider half is built (P3, `apps/paygate/`). Full detail —
+env vars, the six chaos behaviours, how to force a scenario, a worked signature
+verification — is in `apps/paygate/README.md`. The declared deviations from the
+brief are mirrored here, because an addition that is declared reads as
+engineering judgement and the same code undeclared reads as having misread the
+spec.
+
+### Extensions to the brief's §06 spec (Paygate)
+
+Every item is **additive**: nothing the brief specifies behaves differently
+because of it.
+
+| # | Extension | Why |
+| --- | --- | --- |
+| 1 | Events `charge.failed` and `refund.succeeded` | The brief names only `charge.succeeded`. Without the other two the FAILED and REFUNDED states are unreachable, and INV-4 — hold expires, payment succeeds, money is automatically refunded — has no evidence the refund settled. |
+| 2 | A `refund_id` field on `refund.succeeded` bodies | The correlation key for a refund. The signature still covers the whole body; a receiver ignoring unknown fields is unaffected. |
+| 3 | `POST /paygate/_test/deliver` and `POST /paygate/_test/delay` | A chaos rate is a property of the population, not of any one run. An INV-3 test waiting for the 30% duplicate branch, or an INV-4 test hoping for the 5% late branch, is a coin flip rather than a test. These make both deterministic. |
+| 4 | `PAYGATE_DECLINE_AMOUNT_MINOR` — a magic decline amount | `charge.failed` has to be reachable on demand, but the brief's chaos table asks for no random declines — and a random decline inside the 200-request proof would be indistinguishable from a real bug. A fixed trigger amount is how real test providers do this. |
+| 5 | `PAYGATE_SEED` — replayable chaos | Unspecified in the brief. A chaotic test double whose branches cannot be reproduced is a coin flip; when a 200-request run turns up one bad booking, replaying the exact chaos is the only way to debug it. Seeded per decision from `(seed, Idempotency-Key)`, not from one global stream, so replay survives concurrency. |
+| 6 | `GET /paygate/charges/:id` and `GET /paygate/refunds/:id` | Read-only. Lets a reviewer see every delivery attempt and the chaos branch each took. |
+| 7 | `X-Request-Id` echoed on every webhook delivery | Not in §06's header list, but §09 Tier 2 requires a correlation id that survives into the webhook path. |
+| 8 | `PAYGATE_WEBHOOK_URL` accepted as an alias for `PAYGATE_CALLBACK_URL` | `docker-compose.yml` uses the second name. Accepting both meant no shared file had to change; the brief's name wins if both are set. |
+
+The `/paygate/_test/*` routes forge signed webhooks and take no authentication.
+They live in their own module (`src/test-routes.ts`) so the boundary between the
+specified provider and added scaffolding is a file boundary rather than a
+comment, and they **refuse to register under `NODE_ENV=production`** regardless
+of `PAYGATE_TEST_ENDPOINTS`. That is not a security control — Paygate holds no
+real money — but a legibility one: nobody reading a production route table
+should have to work out whether an unauthenticated webhook forger is scaffolding
+or an oversight.
+
+### Two implementation choices worth naming
+
+**The idempotency record is written before the transient-failure branch is
+evaluated.** The obvious order — decide the 500 first, record only on success —
+cannot satisfy "a retry with the same Idempotency-Key must not produce a second
+charge", because after a 500 the key is unknown and the retry mints a new
+charge. Writing the key first means the charge id survives the 500; the charge
+exists but is not *materialised* — no outcome, no webhook — until a retry adopts
+it.
+
+**Race-on-response (25%) and delayed delivery (5%) are drawn from a single
+uniform, not two independent coins.** A delivery cannot both precede the 202 and
+arrive 60 seconds late. Independent draws would have silently produced
+25% × 95% = 23.75% races instead of the specified 25%.
+
 ---
 
 ## 5. Indexing and Query Strategy

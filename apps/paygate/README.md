@@ -16,6 +16,55 @@ remembering anything.
 
 ---
 
+## Extensions to the brief's §06 spec
+
+Everything below is **additive** — nothing the brief specifies behaves
+differently because of it. It is listed here in one place because an addition
+that is declared reads as engineering judgement, and the same code undeclared
+reads as having misread the spec.
+
+| # | Extension | Why |
+| --- | --- | --- |
+| 1 | Events `charge.failed` and `refund.succeeded` | The brief names only `charge.succeeded`. Without the other two the API's FAILED and REFUNDED states are unreachable, and INV-4 — hold expires, payment succeeds, money is automatically refunded — has no evidence the refund settled. |
+| 2 | A `refund_id` field on `refund.succeeded` bodies | The obvious correlation key for a refund. Additive: the signature still covers the whole body, and a receiver ignoring unknown fields is unaffected. |
+| 3 | `POST /paygate/_test/deliver` and `POST /paygate/_test/delay` | A chaos rate is a property of the population, not of any one run. An INV-3 test waiting for the 30% duplicate branch, or an INV-4 test hoping for the 5% late branch, is a coin flip rather than a test. See the guard rails below. |
+| 4 | `PAYGATE_DECLINE_AMOUNT_MINOR` — a magic decline amount | The brief's chaos table asks for no random declines, but `charge.failed` needs to be reachable on demand. A fixed trigger amount is how real test providers do this, and it keeps a decline out of the middle of a concurrency proof, where it would be indistinguishable from a real bug. |
+| 5 | `PAYGATE_SEED` — replayable chaos | Unspecified in the brief. A chaotic test double whose branches cannot be reproduced is a coin flip, not a test double; when a 200-request run turns up one bad booking, replaying the exact chaos is the only way to debug it. |
+| 6 | `GET /paygate/charges/:id` and `GET /paygate/refunds/:id` | Read-only. Lets a reviewer see every delivery attempt and the chaos branch each took, rather than taking the log's word for it. |
+| 7 | `X-Request-Id` echoed on every webhook delivery | Not in §06's header list, but brief §09 Tier 2 requires a correlation id that survives into the webhook path. Read off the charge request, stored against the charge. |
+| 8 | `PAYGATE_WEBHOOK_URL` accepted as an alias for `PAYGATE_CALLBACK_URL` | This repository's `docker-compose.yml`, owned by another phase, uses the second name. Accepting both meant no shared file had to change. The brief's name wins if both are set. |
+
+### Guard rails on the test control surface
+
+The `/paygate/_test/*` routes forge signed webhooks and take no authentication.
+Two things keep them from being mistaken for part of the provider:
+
+- They live in their own module, `src/test-routes.ts`, so the line between
+  "the provider the brief specified" and "scaffolding I added" is a file
+  boundary rather than a comment.
+- **They refuse to register when `NODE_ENV=production`**, regardless of
+  `PAYGATE_TEST_ENDPOINTS`. Not a security control — Paygate holds no real
+  money — but a legibility one: nobody reading a production route table should
+  have to work out whether an unauthenticated webhook forger is scaffolding or
+  an oversight. In production it is simply not there. If the flag asked for
+  them, the refusal is logged rather than applied silently, and `/health`
+  reports the effective state, not the requested one.
+
+### Behaviour the spec leaves open
+
+Decided here, and worth disagreeing with explicitly if you would have chosen
+otherwise:
+
+- Reusing an `Idempotency-Key` with a **different body** is `409`, not a silent
+  replay of the original charge. A replay would hide a caller bug.
+- A refund against a charge Paygate never issued is `404`, never `500`.
+- The 10% transient-failure branch applies to `POST /charges` only, as written;
+  it is not extended to refunds.
+- A delivery to an unreachable callback is recorded and dropped, not retried.
+  A retry would add a second source of duplicates on top of the specified 30%.
+
+---
+
 ## Environment
 
 | Variable | Default | What it does |
@@ -26,7 +75,8 @@ remembering anything.
 | `PAYGATE_SEED` | `atrium` | Seeds every chaos decision. Same seed + same Idempotency-Keys ⇒ identical branches. |
 | `PAYGATE_CALLBACK_URL` | — | Where webhooks are POSTed. |
 | `PAYGATE_WEBHOOK_URL` | — | Accepted as an alias. See the note below. |
-| `PAYGATE_TEST_ENDPOINTS` | `on` | The `/paygate/_test/*` control surface. Set `off` to remove those routes entirely. |
+| `PAYGATE_TEST_ENDPOINTS` | `on` | Requests the `/paygate/_test/*` control surface. Set `off` to remove those routes entirely. |
+| `NODE_ENV` | `development` | `production` refuses to register `/paygate/_test/*` at all, whatever `PAYGATE_TEST_ENDPOINTS` says. |
 | `PAYGATE_DECLINE_AMOUNT_MINOR` | `666` | A charge for exactly this amount always resolves `charge.failed`. |
 | `PAYGATE_DELIVERY_TIMEOUT_MS` | `5000` | Per-delivery HTTP timeout. |
 | `LOG_LEVEL` | `info` | pino level. |
@@ -99,15 +149,11 @@ X-Request-Id:        <the correlation id from the charge request>
 
 Events: `charge.succeeded`, `charge.failed`, `refund.succeeded`.
 
-> **Documented extension.** The brief names only `charge.succeeded`. Without
-> `charge.failed` the API can never reach its FAILED state, and without
-> `refund.succeeded` the INV-4 sequence — hold expires, payment succeeds, money
-> is automatically refunded — has no evidence the refund actually settled. Both
-> are additive; nothing about `charge.succeeded` changes. Recorded in `PLAN.md`.
-
-`refund.succeeded` carries one extra field, `refund_id`. Also additive: a
-receiver that ignores unknown fields is unaffected, and the signature still
-covers the whole body.
+> **Extensions 1 and 2.** `charge.failed`, `refund.succeeded`, and the
+> `refund_id` field on refund bodies are additions to §06 — see
+> [Extensions to the brief's §06 spec](#extensions-to-the-briefs-06-spec) above
+> for what each is for. Both are additive: nothing about `charge.succeeded`
+> changes, and the signature still covers the whole body.
 
 **The signature is over the raw bytes.** Paygate serialises the payload exactly
 once and both signs and sends that same string; it never re-serialises. Verify
@@ -187,11 +233,10 @@ fast deliveries sometimes win too.
 
 ## Forcing a scenario
 
-`POST /paygate/_test/*`. **Not part of the brief's spec** — a deliberate
-addition so the API's INV-3 and INV-4 tests are deterministic instead of hoping
-a 30% branch fires. A chaos rate is a property of the population, not of any one
-run; a test that depends on a coin landing heads is not a test. Set
-`PAYGATE_TEST_ENDPOINTS=off` to remove the routes entirely.
+`POST /paygate/_test/*`. **Not part of the brief's spec** — extension 3 above,
+so the API's INV-3 and INV-4 tests are deterministic instead of hoping a 30%
+branch fires. Set `PAYGATE_TEST_ENDPOINTS=off` to remove the routes, and note
+that `NODE_ENV=production` removes them regardless.
 
 ### `POST /paygate/_test/deliver` — deliver a specific event now
 
@@ -308,7 +353,7 @@ or directly:
 pnpm --filter @atrium/paygate build && PAYGATE_SECRET=dev pnpm --filter @atrium/paygate start
 ```
 
-Tests — 33 of them, no network beyond a loopback receiver:
+Tests — 39 of them, no network beyond a loopback receiver:
 
 ```bash
 pnpm --filter @atrium/paygate test
@@ -316,8 +361,8 @@ pnpm --filter @atrium/paygate test
 
 They cover the idempotency contract (including recovery from a 500), signature
 correctness over raw bytes, the refund contract, the delivery history endpoint,
-the control surface, and that all six chaos rates match the brief within
-tolerance over a 20,000-key sample.
+the control surface and its production refusal, and that all six chaos rates
+match the brief within tolerance over a 20,000-key sample.
 
 ## Known limitations
 
