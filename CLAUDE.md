@@ -249,7 +249,7 @@ never be committed. Do not quote the brief at length in committed files.
 
 ## Current phase
 
-**P1 — schema, constraints, auth, deploy skeleton. In progress.**
+**P1 — schema, constraints, auth, deploy skeleton. Complete except deployment.**
 Next: **P2 — booking core: availability, holds, state machine.**
 
 See `PLAN.md` for the full phase list and the progress log.

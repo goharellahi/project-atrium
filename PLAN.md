@@ -1,186 +1,163 @@
 # PLAN.md
 
-Phases P0–P9. Ordered so that nothing in a lower tier starts until the tier
-above it is correct, tested and running.
+Phases P0–P8, one branch each (see the Working Agreement in `CLAUDE.md`).
+Ordered so that nothing in a lower tier starts until the tier above it is
+correct, tested and running.
 
 **Update this file after every phase**: tick the boxes and append a dated entry
 to the progress log at the bottom.
 
 Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 
+> **Renumbered at P1.** The P0 draft ran P0–P9 on a different split. The phase
+> list below matches the branch names in the Working Agreement, which is the
+> authority. Old P1+P2 merged into the new P1; old P3+P4 into the new P2.
+
 ---
 
-## P0 — Scaffolding and design
+## P0 — Scaffolding and design · `main`
 
 - [x] pnpm workspace monorepo: `apps/api`, `apps/paygate`, `apps/web`,
       `tests/concurrency`, `tests/authz`, `tests/load`
 - [x] `.gitignore` excluding `.brief/` — written before the first commit
-- [x] `docker-compose.yml`: postgres + api1/api2/api3 + nginx + paygate + web,
-      healthcheck on every service, api `depends_on` postgres `service_healthy`
+- [x] `docker-compose.yml`: postgres + api1/api2/api3 + nginx + paygate + web
 - [x] `nginx/nginx.conf` — round-robin over three replicas on :8080
 - [x] Dockerfiles for api, paygate, web on `node:26-alpine`
-- [x] `CLAUDE.md` — invariants, mechanisms, hard rules, pinned versions
-- [x] `ARCHITECTURE.md` first draft — Concurrency Strategy and Assumptions
-      filled, remaining sections stubbed
-- [x] `DESIGN.md` — visual direction fixed before any UI exists
+- [x] `CLAUDE.md`, `PLAN.md`, `ARCHITECTURE.md` first draft, `DESIGN.md`
 - [x] Pinned versions verified to resolve on npm
 
-> The brief requires the concurrency strategy to be committed and pushed within
-> the first 4 hours, **before the hold endpoint exists in the repository**.
-> Commit timestamps are checked. This phase is that commit.
+> The brief requires the concurrency strategy committed **before the hold
+> endpoint exists**. Commit timestamps are checked. P0 is that commit.
 
 ---
 
-## P1 — Schema, extensions and constraints
+## P1 — Schema, constraints, auth, deploy skeleton · `feat/p1-schema-auth`
 
-- [ ] `CREATE EXTENSION IF NOT EXISTS btree_gist` as the first migration
-- [ ] Drizzle schema in `apps/api/src/db`: venues, rooms, equipment_types,
-      users, bookings, booking_line_items, payments, audit_events
-- [ ] `bookings.slot` as `tstzrange`, generated to include the 15-minute
-      turnaround buffer
-- [ ] `no_room_overlap` exclusion constraint (hand-written SQL migration —
-      Drizzle does not model `EXCLUDE USING gist`)
-- [ ] Booking status enum and the `CHECK` constraints that go with it
-- [ ] `audit_events` append-only: revoke UPDATE and DELETE at the role level,
-      not merely by convention
-- [ ] Connection pool wired; `/health` upgraded to actually check the database
-- [ ] Test: the exclusion constraint rejects an overlapping insert
-- [ ] Test: the exclusion constraint permits a booking that starts exactly at
-      the end of the previous turnaround gap
-
----
-
-## P2 — Auth and venue-scoped authorisation
-
-- [ ] Password hashing, login, JWT issue and verify
-- [ ] Four roles: CUSTOMER, VENUE_STAFF, VENUE_ADMIN, PLATFORM_ADMIN
-- [ ] Guard deriving `venue_id` from the token, never from path or body
-- [ ] Repository layer that cannot express a venue-unscoped query by accident
-- [ ] **INV-6 negative test suite** in `tests/authz`: VENUE_ADMIN of Venue A
-      gets 403/404 and never data for a booking, room and report of Venue B,
-      including by real valid UUID read from the seed
-- [ ] PLATFORM_ADMIN positive control, so the suite cannot pass by denying all
+- [x] `CREATE EXTENSION btree_gist`
+- [x] Drizzle schema: venues, rooms, equipment_types, users,
+      cancellation_policies, bookings, booking_line_items, payments,
+      payment_events, webhook_deliveries, audit_events
+- [x] `bookings.slot` as a generated `tstzrange` including the 15-minute
+      turnaround
+- [x] `no_room_overlap` exclusion constraint, hand-written SQL
+- [x] `audit_events` append-only, enforced by trigger not convention
+- [x] CHECK constraints: role/venue coherence, interval sanity, 10% buffer cap
+- [x] Constraint verified by hand against real Postgres; transcript in
+      ARCHITECTURE.md §3
+- [x] JWT auth, argon2id, `POST /auth/login`, `POST /auth/register`,
+      `GET /auth/me`
+- [x] RolesGuard and VenueScopeGuard; guards global, routes opt out
+- [x] Tenant isolation enforced at the repository layer
+- [x] zod 4 validation pipe, 422 on failure
+- [x] pino structured logging with a request correlation id
+- [x] `/health` genuinely checks Postgres
+- [x] Multi-stage Dockerfile, `render.yaml`, `vercel.json`, `.env.example`
+- [x] `.github/workflows/ci.yml` — install, migrate, typecheck, lint, test
+- [x] `README.md` with a populated Known Issues section
+- [x] `docker compose up` stands up all 8 services healthy from empty
+- [ ] **Deployed and reachable** — blocked on dashboard steps (see handoff)
+- [ ] CI green on this branch — cannot be observed until pushed
 
 ---
 
-## P3 — Availability and cross-venue search
+## P2 — Booking core · `feat/p2-booking-core`
 
 - [ ] Room availability query over a 7-day range
-- [ ] Cross-venue search: city, minimum capacity, amenity set, price ceiling
-      and availability window, all combined
-- [ ] Operating-hours validation per day of week
-- [ ] Granularity rules: 30-minute increments, 1–8 hours, 1 hour to 90 days
-      ahead
-- [ ] First-pass indexes (measured properly in P8, not guessed here)
-
----
-
-## P4 — Holds and the booking state machine
-
+- [ ] Cross-venue search: city, capacity, amenity set, price ceiling and
+      availability window, combined
+- [ ] Operating-hours validation per day of week, in the venue's timezone
+- [ ] Granularity: 30-minute increments, 1–8 hours, 1 hour to 90 days ahead
 - [ ] State machine service — the **only** place `bookings.status` is written
 - [ ] Every transition emits exactly one AuditEvent
 - [ ] Illegal transition returns 409, never 500
-- [ ] Hold creation inside one transaction: in-transaction expiry of stale
-      holds, then insert against the exclusion constraint (**INV-1**)
-- [ ] Equipment admission: `SELECT ... FOR UPDATE` on the equipment type, then
-      the sweep-line peak-concurrent-usage check (**INV-2**)
-- [ ] Overbooking buffer, equipment only; rooms reject a non-zero buffer with
-      422 (see ARCHITECTURE.md Assumption 2)
+- [ ] Hold creation in one transaction: in-transaction expiry of stale holds,
+      then insert against the exclusion constraint (**INV-1**)
+- [ ] Equipment admission: `SELECT ... FOR UPDATE` then the sweep-line
+      peak-concurrent-usage check (**INV-2**)
+- [ ] Overbooking buffer, equipment only; rooms reject non-zero with 422
 - [ ] Background hold sweeper, HELD to EXPIRED
-- [ ] Checkout re-arm: 10 minutes from checkout, at most twice, never beyond
-      30 minutes total hold life (Assumption 1)
-- [ ] Unit tests over the state machine, including every failure edge
+- [ ] Checkout re-arm: 10 minutes, at most twice, 30-minute lifetime cap
+- [ ] Unit tests over the state machine, every failure edge
+- [ ] **INV-6 negative suite** in `tests/authz`, using real UUIDs from the seed
 
 ---
 
-## P5 — Paygate and payment integrity
+## P3 — Paygate and payment integrity · `feat/p3-payments-paygate`
 
-- [ ] Paygate to spec: `POST /paygate/charges`, `POST /paygate/refunds`,
-      HMAC-signed webhook delivery
-- [ ] All six chaos behaviours behind `PAYGATE_CHAOS=on`: duplicate delivery
-      30%, race on response 25%, transient 500 10%, delayed delivery 5%,
-      out-of-order, bad signature 2%
+- [ ] `POST /paygate/charges`, `POST /paygate/refunds`, HMAC-signed webhooks
+- [ ] All six chaos behaviours behind `PAYGATE_CHAOS=on`
 - [ ] Idempotency-Key honoured on charges and refunds
-- [ ] Webhook handler idempotent **on business effect**, not merely
-      deduplicated on delivery id (**INV-3**)
-- [ ] Signature verification: bad signature is 401, logged, never processed
+- [ ] Webhook handler idempotent **on business effect**, via
+      `payment_events UNIQUE (charge_id, event)` (**INV-3**)
+- [ ] Bad signature → 401, logged, never processed
 - [ ] Webhook for an unknown charge neither 500s nor is silently dropped
-- [ ] Fast webhook path — no heavy work inline; the choice is explained in
-      ARCHITECTURE.md
-- [ ] Expired hold plus successful payment triggers automatic refund and
-      records the sequence (**INV-4**)
+- [ ] Fast webhook path, no heavy work inline; choice explained
+- [ ] Expired hold + successful payment → automatic refund, recorded (**INV-4**)
+- [ ] Cancellation with data-driven refund policy; policy snapshot at
+      confirmation; refunds idempotent
+- [ ] Reconciliation endpoint proving **INV-5**, zero discrepancies
 
 ---
 
-## P6 — The concurrency proof
+## P4 — The concurrency proof · `feat/p4-concurrency-proof`
 
 - [ ] 200 concurrent requests, released together, through nginx on :8080
 - [ ] Same room, same one-hour slot: exactly one success
 - [ ] EquipmentType with exactly 3 units: at most 3 units reserved
-- [ ] Every other request receives a clean 409, not an error, not a duplicate
-      success
+- [ ] Every other request gets a clean 409 — not an error, not a duplicate
 - [ ] Database re-read after the run, not just HTTP assertions
 - [ ] Replica distribution recorded in the output
 - [ ] Output pasted into `ARCHITECTURE.md`
 
 ---
 
-## P7 — Cancellation, refunds and reconciliation
+## P5 — Tests and observability · `feat/p5-tests-observability`
 
-- [ ] Refund policy as data: platform default tiers, venue override via API,
-      effective immediately with no deployment
-- [ ] Policy snapshot written onto the booking at confirmation; cancellation
-      reads the snapshot, never live policy (Assumption 3)
-- [ ] Refund calculator unit tests across every tier boundary
-- [ ] Refunds idempotent — double-clicking cancel refunds once
-- [ ] Reconciliation endpoint proving **INV-5**, returning zero discrepancies
+- [ ] Unit tests over the refund calculator, every tier boundary
+- [ ] One end-to-end happy path
+- [ ] Correlation id surviving into the webhook path, proven by a test
+- [ ] CI green with the full suite
 
 ---
 
-## P8 — Seed, indexing and load test
+## P6 — Frontend · `feat/p6-frontend`
 
-- [ ] One seed script, two profiles: `--profile=demo` and `--profile=full`
-- [ ] Deterministic non-overlapping slot generation per room (Assumption 4)
-- [ ] `EXPLAIN ANALYZE` for the availability and search queries, before
-      indexing work
-- [ ] Indexing pass; `EXPLAIN ANALYZE` after, with a sentence on what changed
-- [ ] k6 scripts in `tests/load`, run from the `grafana/k6` image
-- [ ] `LOAD_TEST.md`: p50/p95/p99 and error rate per endpoint, machine spec,
-      both EXPLAIN outputs
-
----
-
-## P9 — Console, deployment, CI and final documents
-
-- [ ] Venue admin console per `DESIGN.md` — rooms, equipment, pricing, policy
+- [ ] Console per `DESIGN.md` — rooms, equipment, pricing, policy
+- [ ] Booking flow: search, hold, checkout, confirmation
 - [ ] Revenue and utilisation report per venue over a date range
-- [ ] Structured logging with a correlation id surviving into the webhook path
-- [ ] `/health` checking real dependencies
-- [ ] CI running the test suite on every push
-- [ ] Deploy API and web to a zero-cost host, seeded to the demo profile
-- [ ] Five test logins: one per role plus a second venue admin at another venue
-- [ ] `README.md` with `docker compose up` working in under 5 minutes, plus a
-      blunt "Known Issues and What I Did Not Finish"
-- [ ] `DECISIONS.md` — 8–15 entries, each with the choice, one rejected
-      alternative, and the trade-off accepted
-- [ ] `AI_LOG.md` — what was delegated, where the agent was wrong or naive,
-      what was overridden and why
+
+---
+
+## P7 — Performance · `feat/p7-performance`
+
+- [ ] One seed script, two profiles: `--profile=demo`, `--profile=full`
+- [ ] Deterministic non-overlapping slot generation (Assumption 4)
+- [ ] `EXPLAIN ANALYZE` before indexing work
+- [ ] Indexing pass; `EXPLAIN ANALYZE` after, with what changed
+- [ ] k6 scripts, run from the `grafana/k6` image
+- [ ] `LOAD_TEST.md`: p50/p95/p99, error rate, machine spec, both EXPLAINs
+
+---
+
+## P8 — Final documents · `docs/p8-final`
+
+- [ ] `DECISIONS.md` — 8–15 entries: choice, rejected alternative, trade-off
+- [ ] `AI_LOG.md` — what was delegated, where the agent was wrong or naive
 - [ ] `TIMELINE.md` — hour by hour, what was cut, why
-- [ ] `ARCHITECTURE.md` stub sections completed
+- [ ] `ARCHITECTURE.md` stubs completed: ERD, state machine, payment integrity,
+      indexing, stack justification, 100x, two more weeks
+- [ ] Five test logins: one per role plus a second venue admin at another venue
 - [ ] 5-minute walkthrough recording
 
 ---
 
 ## Deliverables checklist
 
-Tracked separately because they cut across phases.
-
-- [ ] Public git repository with real commit history (a single squashed commit
-      scores zero on process)
+- [ ] Public git repository with real commit history
 - [ ] Deployed frontend URL, live and seeded
 - [ ] Deployed API URL, live and seeded
-- [ ] `README.md`
-- [ ] `ARCHITECTURE.md` — all 8 required sections
+- [x] `README.md` (stub with Known Issues; final pass in P8)
+- [ ] `ARCHITECTURE.md` — all required sections
 - [ ] `DECISIONS.md`
 - [ ] `AI_LOG.md`
 - [ ] `TIMELINE.md`
@@ -192,14 +169,14 @@ Tracked separately because they cut across phases.
       calculator units, one end-to-end happy path
 - [ ] Walkthrough recording
 
-### Explicit non-goals for now
+### Explicit non-goals
 
 Tier 3 is deliberately unscheduled: live heatmap and WebSockets, natural
 language booking, recurring bookings, waitlist with automatic promotion,
 notifications. The brief is direct that a beautiful real-time calendar with a
 race condition in the hold path scores below a plain submission with all of
-Tier 1 correct. If time remains after P9, that is when this gets revisited —
-and the choice gets recorded in `TIMELINE.md`.
+Tier 1 correct. Revisited only if time remains after P8, and recorded in
+`TIMELINE.md` either way.
 
 ---
 
@@ -208,22 +185,52 @@ and the choice gets recorded in `TIMELINE.md`.
 ### 2026-08-23 — P0 complete
 
 Scaffolding and design only. No booking logic, no endpoints, no hold code — by
-design, so that the commit timestamp on the concurrency strategy precedes any
+design, so the commit timestamp on the concurrency strategy precedes any
 implementation of it.
 
-Built: pnpm workspace with three apps and three test packages; docker compose
-standing up postgres, three identical API replicas, an nginx round-robin load
-balancer on :8080, paygate on :9000 and web on :3000, with a healthcheck on
-every service; nginx config; Dockerfiles on node:26-alpine; `CLAUDE.md`,
-`PLAN.md`, `ARCHITECTURE.md` (Concurrency Strategy and Assumptions written in
-full, six sections stubbed), `DESIGN.md`.
-
-The only executable code written is a Nest bootstrap with a liveness-only
-`/health`, a Fastify server with the same, and a placeholder Next page —
-present because docker healthchecks need something to probe, and marked as
-liveness-only rather than pretending to check dependencies they do not.
-
-Verified: all 18 pinned package versions resolve on npm; `docker compose
+Built the workspace, compose stack, nginx config, Dockerfiles, and the four
+documents. Verified all 18 pinned versions resolve on npm and `docker compose
 config` validates.
 
-Not done, deliberately: schema, endpoints, hold logic, UI.
+### 2026-08-23 — P1 complete (except deployment)
+
+Schema, constraints, auth, observability and the deploy skeleton. The whole
+compose stack now comes up healthy from an empty database and serves
+authenticated traffic through the load balancer.
+
+**Four things went wrong, all found by running the stack rather than reasoning
+about it. Each is worth keeping.**
+
+1. **The migration as specified did not run.** `ends_at + interval '15 minutes'`
+   is STABLE, not IMMUTABLE, so Postgres refuses it in a `STORED` generated
+   column. Fixed by pinning the arithmetic to UTC. Both versions left in
+   ARCHITECTURE.md §3 rather than silently corrected.
+2. **drizzle-kit wanted to `DROP COLUMN slot`** — and would have taken
+   `no_room_overlap` with it, since the constraint depends on the column. Caught
+   because the generated 0002 was read before being trusted. Snapshot patched so
+   `generate` is a clean no-op.
+3. **Every Docker build was silently using the host's Windows `node_modules`.**
+   Docker does not honour per-directory `.dockerignore`; the `apps/*/.dockerignore`
+   files were inert. Root `.dockerignore` added, misleading files removed.
+4. **Intermittent 502s under the load balancer.** Docker DNS returns AAAA
+   records, so nginx connected over IPv6 while the API bound `0.0.0.0`. This one
+   matters most: during the P4 concurrency proof it would have produced failures
+   indistinguishable from a genuine invariant violation. Now binds `::`.
+
+Also: `node:26-alpine` no longer ships corepack, and Drizzle nests pg errors
+under `cause`, so a duplicate registration returned 500 instead of 409 until
+`common/pg-errors.ts` was written to walk the chain. That helper is what will
+catch `23P01` from the exclusion constraint in P2.
+
+**Verified by hand**, transcript in ARCHITECTURE.md §3: overlapping holds
+rejected with 23P01; a booking ending 10:00 blocks a 10:10 start but permits
+10:15; a CANCELLED booking releases its slot; `audit_events` rejects UPDATE and
+DELETE; role/venue CHECK rejects both incoherent shapes. Auth verified through
+nginx: 201/200/401/409/422 all correct, `passwordHash` never serialised, and a
+register body carrying `role: PLATFORM_ADMIN` produces a CUSTOMER.
+
+**Not done:** the deployment itself. Blocked on dashboard steps that need a
+human. CI cannot be observed green until the branch is pushed.
+
+**Deliberately not built:** any booking logic, availability query, hold
+endpoint or seed script. Those are P2.
