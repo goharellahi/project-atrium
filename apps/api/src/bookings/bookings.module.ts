@@ -7,10 +7,8 @@ import { AvailabilityService } from '../rooms/availability.service';
 import { RoomsController } from '../rooms/rooms.controller';
 import { SearchController } from '../search/search.controller';
 import { SearchService } from '../search/search.service';
-import {
-  PAYMENT_PROVIDER,
-  UnimplementedPaymentProvider,
-} from '../payments/payment-provider';
+import { StateMachineModule } from './state-machine.module';
+import { PaymentsModule } from '../payments/payments.module';
 import { DB, ENV_TOKEN } from '../app.tokens';
 import type { Db } from '../db/client';
 import type { Env } from '../config/env';
@@ -25,10 +23,11 @@ import type { Env } from '../config/env';
  * without standing up a container.
  */
 @Module({
+  // PaymentsModule for the cancellation refund; StateMachineModule because the
+  // state machine is shared with it and neither may own the other.
+  imports: [StateMachineModule, PaymentsModule],
   controllers: [BookingsController, RoomsController, SearchController],
   providers: [
-    BookingStateMachine,
-
     {
       provide: AvailabilityService,
       inject: [DB, ENV_TOKEN],
@@ -52,11 +51,7 @@ import type { Env } from '../config/env';
       useFactory: (db: Db, sm: BookingStateMachine, env: Env) =>
         new HoldSweeper(db, sm, env),
     },
-
-    // Bound so the container is complete and an accidental call fails loudly.
-    // P3 replaces this with the real Paygate client.
-    { provide: PAYMENT_PROVIDER, useClass: UnimplementedPaymentProvider },
   ],
-  exports: [BookingStateMachine, BookingsService, AvailabilityService],
+  exports: [StateMachineModule, BookingsService, AvailabilityService],
 })
 export class BookingsModule {}

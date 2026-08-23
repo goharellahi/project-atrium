@@ -17,7 +17,17 @@ async function bootstrap(): Promise<void> {
     await runMigrations(env.DATABASE_URL);
   }
 
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  // `rawBody: true` keeps the exact bytes of every request body available as
+  // `req.rawBody`, which the Paygate webhook route needs.
+  //
+  // Nest parses a JSON body and throws the original bytes away. Verifying an
+  // HMAC against a re-serialised object works right up until a body arrives
+  // whose key order or number formatting does not survive the round trip — at
+  // which point every signature fails and the cause looks like a wrong secret
+  // rather than a wrong input. This is the one line that prevents that, and it
+  // has to be here rather than in the controller, because by the time a handler
+  // runs the bytes are already gone.
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
   app.enableShutdownHooks();
 
   // Bind dual-stack, not '0.0.0.0'.
