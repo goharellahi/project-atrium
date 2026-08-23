@@ -22,6 +22,30 @@ against a deliberately unreliable provider, and honest documentation.
 
 ---
 
+## Deployed
+
+| | URL |
+| --- | --- |
+| API | https://atrium-api-3p3j.onrender.com |
+| Console | https://project-atrium.vercel.app |
+
+```bash
+curl -s https://atrium-api-3p3j.onrender.com/health
+```
+
+Two things a reviewer should know before trying these:
+
+- **The API sleeps after 15 minutes idle.** The first request wakes it and takes
+  30–60 seconds. That is Render's free tier, not the application.
+- **The database is empty.** The seed script is P7, so there are no test logins
+  yet. `POST /auth/register` works today and creates a CUSTOMER; the five
+  role-based logins the brief asks for arrive with the seed.
+
+The deployed API runs **one** replica. The three-replica configuration is local
+only — see [Why three replicas](#why-three-replicas).
+
+---
+
 ## Running it
 
 Requires Docker. Nothing else.

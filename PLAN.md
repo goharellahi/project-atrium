@@ -154,8 +154,9 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 ## Deliverables checklist
 
 - [ ] Public git repository with real commit history
-- [~] Deployed API URL — live; seeding is P7
-- [~] Deployed frontend URL — live; the console itself is P6
+- [~] Deployed API URL — https://atrium-api-3p3j.onrender.com — live; seeding is P7
+- [~] Deployed frontend URL — https://project-atrium.vercel.app — live; the
+      console itself is P6
 - [x] `README.md` (stub with Known Issues; final pass in P8)
 - [ ] `ARCHITECTURE.md` — all required sections
 - [ ] `DECISIONS.md`
