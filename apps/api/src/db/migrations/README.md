@@ -21,6 +21,25 @@ rather than being split across generated output.
 generate` sees the column as present and will not emit a `DROP COLUMN` for it.
 Do not delete `slot` from `schema.ts` — that is what keeps the snapshot honest.
 
+## Snapshots, and why `generate` is a no-op again (P6)
+
+`drizzle-kit generate` diffs `schema.ts` against the newest snapshot in `meta/`.
+Migrations 0005, 0006 and 0007 were hand written and shipped without one, so the
+snapshot sat at 0004 and `generate` re-proposed everything those three had
+already done — a 0008 that dropped two indexes, added a column and created three
+indexes that all existed.
+
+That is worse than untidy. P1's note above explains that a stale snapshot is
+exactly how `generate` comes to emit `DROP COLUMN slot` and take INV-1 with it.
+It did not this time — the check was run and the output read — but the only
+reason to be confident about that is having looked, and the point of a clean
+`generate` is not having to.
+
+`meta/0007_snapshot.json` is that snapshot, adopted from the 0008 drizzle-kit
+proposed and renumbered to the migration it actually describes. `generate` now
+answers "No schema changes, nothing to migrate". **If you hand-write a
+migration, refresh the snapshot in the same commit.**
+
 ## `0001_constraints.sql` — hand written
 
 Never regenerate. Contains:
