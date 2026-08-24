@@ -37,8 +37,8 @@ push, never open a PR, never merge, never touch a remote.
   | P3 | `feat/p3-paygate` — provider only; the API half landed in P4 |
   | P4 | `feat/p4-payments-integrity` — was `p4-concurrency-proof`; the proof shipped in P2 |
   | P5 | `feat/p5-verify-e2e` — was `p5-tests-observability`; its unit tests shipped in P4 |
-  | P6 | `feat/p6-frontend` |
-  | P7 | `feat/p7-performance` |
+  | P6 | `feat/p6-performance` — swapped with the frontend; see `PLAN.md` |
+  | P7 | `feat/p7-frontend` |
   | P8 | `docs/p8-final` |
 
 - **Never commit to `main`.** `main` is merged into only by the human, via PR.
@@ -249,20 +249,32 @@ never be committed. Do not quote the brief at length in committed files.
 
 ## Current phase
 
-**P5 — verified against the running stack, on `feat/p5-verify-e2e`.** All six
-invariants are now demonstrated rather than designed for: 69 offline tests, 24
-INV-6 assertions, the 200-request proof (plus eight consecutive re-runs), 20
-payment-integrity assertions, and a three-minute chaos soak reconciling to zero.
-Transcripts in `ARCHITECTURE.md` Appendices B–D.
+**P6 — performance, measured, on `feat/p6-performance`.** P6 and P7 swapped:
+performance held the remaining Tier 1 risk, the console holds none of it.
 
-P5 found seven defects, six in code P4 called complete — including one that made
-the entire payment path inert. Read the P5 entry in `PLAN.md` before trusting
-anything that has not been run.
+The `full` profile is real now — 250,000 bookings over 24 months, evenly spread,
+counted from the tables rather than tallied in memory. Three indexes were added
+because a plan changed, two deleted, and **two built and rejected**; the
+rejections are in `ARCHITECTURE.md` §5 and are the more useful half. Three of the
+four benchmarked p95 targets are met; create-hold misses at 536 ms against 250 ms
+and the cause is measured, not guessed (`LOAD_TEST.md` §5). `ARCHITECTURE.md` §8
+is grounded in plans captured by widening real queries until they saw 100×
+density, rather than in arithmetic.
 
-Next: **P6 — the frontend**, per `DESIGN.md`. Outstanding smaller items are
-listed under P5 in `PLAN.md`: CI runs only the offline tests, nothing asserts
-the correlation id survives into the webhook path, and the proof has not been
-run against the `full` profile.
+Both P5 gaps are closed: the 200-request proof holds at 250,000 rows over three
+consecutive runs, and the correlation id is now assertable because
+`webhook_deliveries.correlation_id` gives it somewhere to be observed.
+
+P6 found four defects in work already believed finished — a seed whose totals
+were right and whose distribution made the benchmark meaningless, a stride
+losing 46 rows to floating point, and two tests in P5's own suite that passed for
+the wrong reasons. Read the P6 entry in `PLAN.md` before trusting a number that
+has not been re-run.
+
+Next: **P7 — the frontend**, per `DESIGN.md`. Still open: CI runs only the
+offline tests; the rooms-reject-non-zero-overbooking-buffer 422 from P2 waits on
+the venue administration screen; and create-hold's p95 needs either more cores or
+the availability enumeration moved off the request path.
 
 See `PLAN.md` for the full phase list and the progress log.
 

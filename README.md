@@ -177,15 +177,27 @@ nginx/nginx.conf   round-robin LB over the three replicas
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
 
-**Current phase: P5 complete — the whole system verified against a running
-stack.** All six invariants are demonstrated rather than argued: 69 offline
-tests, 24 tenant-isolation assertions, the 200-request concurrency proof, 21
-payment-integrity assertions and a three-minute chaos soak reconciling to zero.
-Transcripts are in [ARCHITECTURE.md](ARCHITECTURE.md), Appendices B–D.
+**Current phase: P6 complete — performance, measured.** P6 and P7 swapped
+places: performance held the remaining Tier 1 risk, the console holds none of
+it.
+
+The four endpoints the brief benchmarks were run against 250,000 bookings
+through the load balancer. **Three of the four p95 targets are met; create-hold
+misses at 536 ms against 250 ms** — and the cause is measured rather than
+guessed. Numbers, machine spec, `EXPLAIN` before and after, and the elimination
+that found the real bottleneck are in [LOAD_TEST.md](LOAD_TEST.md).
+
+Three indexes were added because a plan changed, two deleted, and **two built,
+measured and rejected** — one of which turned out never to be used as an index
+at all and to be supplying a planner *estimate*. That finding is in
+[ARCHITECTURE.md](ARCHITECTURE.md) §5, along with §8, which grounds "what breaks
+at 100x" in plans captured by widening real queries until they saw that density.
 
 P5 found seven defects in code earlier phases had called complete, including one
-that meant the payment path had never worked at all. They are itemised in the P5
-entry of [PLAN.md](PLAN.md), which is the honest record of this project.
+that meant the payment path had never worked at all. P6 found four more —
+including a seed whose row counts were all correct and whose *distribution* made
+the benchmark meaningless. They are itemised in the P5 and P6 entries of
+[PLAN.md](PLAN.md), which is the honest record of this project.
 
 The API is deployed on Render's free tier and the console on Vercel; both answer
 `/health`. **The deployed database is not seeded** — seeding runs against the
@@ -195,18 +207,22 @@ local compose stack.
 
 Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 
-- **Frontend.** `apps/web` is a placeholder page. P6.
+- **Frontend.** `apps/web` is a placeholder page. P7.
 - **Venue administration.** Nothing writes `venues.overbooking_buffer_pct`, so
-  the room-side 422 for a non-zero buffer has no way to be triggered yet. P6.
-- **Indexing.** No indexing pass has been done and no `EXPLAIN ANALYZE`
-  captured. The P2 queries are written for correctness, not for plans. P7.
+  the room-side 422 for a non-zero buffer has no way to be triggered yet. P7.
+- **Create-hold's p95.** Missed at 536 ms against a 250 ms target. The endpoint
+  answers in 47 ms p95 in isolation, so it is starved rather than slow: three
+  Node replicas are pinned at one core each on a four-core laptop. Not a defect
+  to fix in code so much as a ceiling to report honestly —
+  [LOAD_TEST.md](LOAD_TEST.md) §5 has the two hypotheses that were wrong and the
+  four things I would do next.
 
 ### Tests that do not exist yet, and should
 
 Stated separately from the above because these are gaps in *evidence*, not in
 features — the more expensive kind to leave undocumented.
 
-- **CI runs 69 of 118 tests.** The offline suites and the route census run on
+- **CI runs 69 of 121 tests.** The offline suites and the route census run on
   every push; the concurrency proof, the tenant-isolation probes, the
   payment-integrity suite and the soak all need a compose stack CI does not
   stand up. They run locally via `pnpm proof`, `pnpm authz`, `pnpm e2e` and
@@ -216,12 +232,11 @@ features — the more expensive kind to leave undocumented.
   one-audit-row-per-transition rule and the 409 body are exercised by the proof
   and the e2e suite rather than by a dedicated unit suite. Those need a real
   Postgres.
-- **Nothing asserts the correlation id survives into the webhook path.** The
-  plumbing is there and Paygate echoes `X-Request-Id` on every delivery, but no
-  test follows one id from `/bookings/hold` through to the webhook and back.
-- **The proof has only been run against the `demo` profile** (25k bookings). It
-  has not been run against `full` (250k), where the gist index is doing
-  materially more work.
+- **The benchmark is one machine's.** Every number in
+  [LOAD_TEST.md](LOAD_TEST.md) comes from a single four-core laptop with the
+  load generator co-resident, over 60-second runs. The saturation analysis is
+  sound on that box and untested on any other, and nothing there says what the
+  gist index costs to maintain under sustained write load over days.
 
 ### Known limitations of what *is* built
 

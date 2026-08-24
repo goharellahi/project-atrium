@@ -172,7 +172,8 @@ integrity work lands separately once the booking core exists.
 - [x] Database re-read after the run, not just HTTP assertions
 - [x] Replica distribution recorded in the output
 - [x] Output pasted into `ARCHITECTURE.md` (Appendix A)
-- [ ] Re-run against the `full` profile — 250k rows, not 25k
+- [x] Re-run against the `full` profile — 250k rows, not 25k *(P6; three
+      consecutive clean runs, LOAD_TEST.md §7)*
 
 ---
 
@@ -196,31 +197,55 @@ integrity work lands separately once the booking core exists.
 - [ ] Unit tests over the state machine's *runtime* edges — the row lock, one
       audit row per transition, the 409 body. Needs a real Postgres; the edges
       are covered end to end by the proof and the e2e suite, not per-edge.
-- [ ] Correlation id surviving into the webhook path, proven by a test — the
-      plumbing is in and Paygate echoes `X-Request-Id`, but nothing asserts it
+- [x] Correlation id surviving into the webhook path, proven by a test *(P6)* —
+      `webhook_deliveries.correlation_id` gives the chain somewhere to be
+      observed, and the assertion is made at both ends: Paygate's own record of
+      the charge, and the delivery row the API wrote on the way back in
 - [ ] CI green with the full suite — CI runs the 69 offline tests only; the
       other 49 need a compose stack CI does not stand up
 
 ---
 
-## P6 — Frontend · `feat/p6-frontend`
+## P6 — Performance · `feat/p6-performance`
 
-- [ ] Console per `DESIGN.md` — rooms, equipment, pricing, policy
-- [ ] Booking flow: search, hold, checkout, confirmation
-- [ ] Revenue and utilisation report per venue over a date range
-
----
-
-## P7 — Performance · `feat/p7-performance`
+> **Swapped with the frontend.** P6 was the console and P7 was performance; they
+> traded places. The reason is that performance is where the remaining *Tier 1*
+> risk was — the indexing evidence, the benchmark, and the two things P5 left
+> unproven — while the console is Tier 2 and depends on nothing here. Doing it
+> in this order also meant the revenue report existed before the page that
+> renders it, rather than the reverse.
 
 - [x] One seed script, two profiles — **delivered in P2**, where the proof and
       every manual check needed it. Renumbering drift, corrected rather than
       worked around.
 - [x] Deterministic non-overlapping slot generation (Assumption 4) — P2
-- [ ] `EXPLAIN ANALYZE` before indexing work
-- [ ] Indexing pass; `EXPLAIN ANALYZE` after, with what changed
-- [ ] k6 scripts, run from the `grafana/k6` image
-- [ ] `LOAD_TEST.md`: p50/p95/p99, error rate, machine spec, both EXPLAINs
+- [x] Seed `--profile=full` verified at volume: 250,000 bookings, 800 rooms,
+      40 venues, 5,000 users, **counted from the tables, not tallied in memory**
+- [x] `EXPLAIN ANALYZE` before indexing work, at 250k rows
+- [x] Indexing pass; `EXPLAIN ANALYZE` after, with what changed — three indexes
+      added, two deleted, **two built and rejected**, all recorded
+- [x] k6 scripts, run from the `grafana/k6` image, through nginx
+- [x] `LOAD_TEST.md`: p50/p95/p99, error rate, machine spec, both EXPLAINs
+- [x] `GET /venues/reports/revenue` — one of the four benchmarked endpoints, and
+      the only one that did not exist *(pulled forward from P7)*
+- [x] `ARCHITECTURE.md` §5 — indexing and query strategy
+- [x] `ARCHITECTURE.md` §8 — what breaks at 100x, grounded in measured plans
+- [ ] Create-hold p95 under its 250 ms target — **missed, 536 ms.** Diagnosed
+      rather than left as a number: the endpoint answers in 47 ms p95 in
+      isolation and the box is CPU-saturated at 340 req/s with three Node
+      replicas pinned at one core each. LOAD_TEST.md §5 has the elimination and
+      the four things I would do next.
+
+---
+
+## P7 — Frontend · `feat/p7-frontend`
+
+- [ ] Console per `DESIGN.md` — rooms, equipment, pricing, policy
+- [ ] Booking flow: search, hold, checkout, confirmation
+- [ ] Revenue and utilisation report per venue over a date range — the API half
+      landed in P6; this is the page that renders it
+- [ ] Venue administration, including the overbooking buffer — which is what
+      unblocks the rooms-reject-non-zero-buffer 422 still open from P2
 
 ---
 
@@ -247,12 +272,13 @@ integrity work lands separately once the booking core exists.
 - [~] Deployed frontend URL — https://project-atrium.vercel.app — live; the
       console itself is P6
 - [x] `README.md` (stub with Known Issues; final pass in P8)
-- [~] `ARCHITECTURE.md` — §3 and §4 complete with verification transcripts;
-      §1, §2, §5, §6, §8, §9 still stubs for P8
+- [~] `ARCHITECTURE.md` — §3, §4, §5 and §8 complete with verification
+      transcripts and measured plans; §1, §2, §6, §9 still stubs for P8
 - [~] `DECISIONS.md` — started in P4, completed in P8
 - [ ] `AI_LOG.md`
 - [ ] `TIMELINE.md`
-- [ ] `LOAD_TEST.md`
+- [x] `LOAD_TEST.md` — four endpoints benchmarked, three targets met, the
+      missed one diagnosed; EXPLAIN before and after; machine spec
 - [x] `CLAUDE.md`
 - [x] `PLAN.md`
 - [x] `DESIGN.md`
@@ -714,3 +740,125 @@ fallback.
 built and that cancel returned `refund: null`, which stopped being true two
 phases ago. Stale documentation about what does not work is worse than none,
 because it is the part a reviewer trusts.
+
+### 2026-08-24 — P6 complete (performance, not the frontend)
+
+**Phases swapped.** P6 was the console and P7 was performance. They traded
+places because performance held the remaining Tier 1 risk — the indexing
+evidence, the benchmark, and the two things P5 left unproven — while the console
+is Tier 2 and depends on nothing here. It also meant the revenue report existed
+before the page that renders it.
+
+Three targets met, one missed and explained. But the most useful things this
+phase produced were four defects in work that was already believed finished, and
+two indexes that were built, measured and thrown away.
+
+---
+
+**The seed was delivering a fixture no benchmark could use, and every count
+agreed that it was fine.** 250,000 rows, 800 rooms, 24 months of span — all
+correct, all checked. The distribution was not: the walk ran forward from the
+start of the range and stopped the moment a room hit its target, which packed
+every room's whole allocation into the oldest months. 21,000 bookings in the
+first month, 410 in the current one, 52 in the last.
+
+Availability, cross-venue search and create-hold all query the *future*, and the
+future was the empty end. Had this not been caught, every p95 in `LOAD_TEST.md`
+would have been measured against a nearly empty region of the table — fast,
+reproducible, and meaningless. It was caught only by looking at a
+`date_trunc('month')` histogram before trusting the fixture, which is now the
+lesson: P5 taught us to verify the seed's *totals*, and this phase adds that a
+correct total can still describe an unusable shape.
+
+The fix walks each room's calendar once to count its real capacity, apportions
+against capacity with the overflow redistributed, then strides the candidate
+sequence so a room emits exactly its target spread across the whole range. Two
+follow-ups fell out of it: the stride used `i * (target / capacity)` and the
+float ratio is off by an ulp on some values, silently losing 46 bookings out of
+250,000; and the seed's summary was tallied in memory, so it agreed with itself
+by construction. The summary is now counted from the tables and prints a
+SHORTFALL block when the two disagree — which immediately caught the seed
+under-reporting its own user count by three.
+
+**Two indexes were built, measured, and deleted. That is the half of an indexing
+pass usually left unrecorded, and it is where both interesting findings were.**
+
+A covering index for the equipment sweep line worked exactly as intended — index-only
+scan, heap fetches gone, 2,267 buffers down to 1,849 — and bought no time at all
+(median 2.75 ms without it, 3.75 ms with). The pages it avoided were already in
+`shared_buffers`. Against 16 MB of index maintained on every booking insert, on
+the hold path. Deleted.
+
+A functional index on `lower(city)` moved cross-venue search hard — 253 buffers
+to 23 — with an `idx_scan` of exactly **zero**. It was never used as an index.
+What it supplied was an *estimate*: Postgres keeps statistics on indexed
+expressions, and without one the planner guessed a single matching venue instead
+of fourteen and chose a plan built for one row. The right object is
+`CREATE STATISTICS ON lower(city)` — identical plan, nothing to maintain on
+writes. Search had a statistics problem wearing an index problem's clothes, and
+keeping the index because "the plan improved" would have left a permanently
+unused object in the schema and the actual cause undiscovered.
+
+Net: three indexes added, two deleted (one of them the now-redundant
+`bookings_venue_idx`, one a `venues_city_idx` with zero lifetime scans), two
+rejected.
+
+**Create-hold missed its 250 ms p95 at 536 ms, and the diagnosis is the
+deliverable.** In isolation the same endpoint answers in 47 ms p95 — so it is
+starved, not slow. Two hypotheses were wrong and are recorded as such: it is not
+the database (Postgres used 178% of eight vCPUs while all three Node replicas sat
+pinned at 92–98%, which is one core each and Node's ceiling), and it is not the
+connection pool (doubling `PG_POOL_MAX` made throughput *worse*, 342 → 265
+req/s). Turning read concurrency down located the knee: throughput is flat at
+~340 req/s from 2 read VUs onward while every latency climbs linearly, which is
+the signature of a saturated box. Hold meets its target at 5 read VUs and misses
+at 10. The machine is a 4-core 1.6 GHz laptop running Postgres, three Node
+replicas, nginx, paygate, the web container and k6 at once.
+
+**The k6 script was wrong twice before it was right**, and both are recorded in
+the script because a re-run will meet them again. It took slots straight from
+`/rooms/:id/availability`, which enumerates starts on a 30-minute grid — so for a
+60-minute booking consecutive entries overlap, and the benchmark competed with
+itself: 196 of 301 holds conflicted with its own earlier bookings. And every
+threshold passed on the first run with `p(95)=0`, because a k6 threshold over an
+*empty* metric passes — the run had died in setup on a 401 and reported four
+green ticks.
+
+**Both P5 gaps are closed.** The 200-request proof was re-run against the full
+profile — three consecutive runs, exactly one admission of 200 for INV-1, exactly
+three of 200 for INV-2, no 5xx, requests spread evenly across all three replicas.
+And the correlation id now has somewhere to be observed:
+`webhook_deliveries.correlation_id`. The chain existed end to end already; what
+was missing was any place to look, which is precisely why nothing asserted it.
+The test asserts at both ends — Paygate's own record of the charge, and the
+delivery row the API wrote on the way back in — because either alone leaves half
+the round trip unwitnessed.
+
+**Two defects in P5's own tests**, found by running them against changed code.
+The bad-signature scenario snapshotted `payment_events` right after `pay()` and
+compared after the corrupted delivery, which measures "no ledger row appeared" —
+not the claim. Paygate's *natural* delivery for the same charge is in flight, and
+when it landed between the two counts the test failed over something unrelated to
+signatures. P5 shipped it green because the race went its way every time it ran.
+And the new INV-6 probe for the revenue report initially used the century-wide
+window copied from the reconciliation probe, which this endpoint correctly
+answers 422 to.
+
+**`ARCHITECTURE.md` §8 is grounded in measurement, not extrapolation.** Where a
+claim needed a bigger number than the fixture provides, the number was measured
+by widening the query's own scan until it saw what 100× density would put in
+front of it. The result is sharper than expected: the equipment sweep line has
+*two* plans available and both are unbounded — a nested loop proportional to an
+equipment type's lifetime line items, and a hash join that scanned 54,589
+bookings to find 162 — and the planner flips between them based on how many
+equipment types the booking names. It runs inside the hold transaction holding
+`SELECT ... FOR UPDATE`, so its cost surfaces as a throughput ceiling rather than
+as latency. That is the honest answer the brief invites, and the per-room
+advisory lock is explicitly *not* on the list, with the reasoning written out.
+
+Reconciliation already takes **5.2 seconds** at this volume, and it is INV-5's
+only evidence — an invariant you cannot check is one you no longer know you have.
+
+**Not done:** `apps/web` was untouched, deliberately and per instruction. The
+rooms-reject-non-zero-overbooking-buffer 422 is still open from P2 and now
+depends on the venue administration screen, which is P7.

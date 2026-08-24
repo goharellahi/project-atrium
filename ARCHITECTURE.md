@@ -464,7 +464,117 @@ arrive 60 seconds late. Independent draws would have silently produced
 
 ## 5. Indexing and Query Strategy
 
-*Stub — P8. With `EXPLAIN ANALYZE` evidence before and after the indexing work.*
+Delivered in P6. Every plan referenced here was captured with
+`EXPLAIN (ANALYZE, BUFFERS)` against the `full` profile — 250,000 bookings, 800
+rooms, 24 months — three warm passes each, keeping the third. The full
+transcripts, the numbers, and the reproduction commands are in `LOAD_TEST.md`
+§6; the capture script is `tests/load/explain/plans.sql`. What follows is the
+argument, one sentence of plan-change per object, not a repeat of the tables.
+
+**Buffer counts decide, not milliseconds.** The first pass of any capture is
+measuring the buffer cache; wall clock on a laptop under Docker Desktop moves
+30% between identical runs. `shared hit` does not.
+
+### The three that were added
+
+**`bookings (venue_id, starts_at)`** — the revenue report's four queries all
+filter both columns, and the single-column `venue_id` index fetched all 7,264 of
+the venue's lifetime bookings and discarded 6,956 of them to the date predicate;
+189 buffers became 29, and the cost now grows with the reporting window instead
+of with the venue's history.
+
+**`bookings USING gist (slot) WHERE status IN ('HELD','PENDING_PAYMENT','CONFIRMED')`**
+— cross-venue search holds a *list* of candidate room ids, so the planner cannot
+use `room_id` as a leading key on `no_room_overlap`'s `(room_id, slot)` gist and
+instead descends that index by time across every room in the table, spending 202
+buffers inside the index scan alone to return 45 rows; a gist on `slot` by
+itself spends 3.
+
+**`bookings (room_id, expires_at) WHERE status = 'HELD'`** — the hold path's
+in-transaction expiry of stale holds was a `BitmapAnd` whose first leg scanned
+every expired hold *on the platform* (10,000 index entries in the measured case),
+inside the hold transaction under the per-room advisory lock; with the partial
+index it is a two-column `Index Cond` costing 8 buffers.
+
+### The two that were deleted
+
+**`bookings_venue_idx`** — a strict prefix of the new composite, so it served
+nothing the composite does not, while costing a second index to maintain on
+every booking write including inside the hold transaction.
+
+**`venues_city_idx`** — zero scans across the entire benchmark and structurally
+incapable of more, because cross-venue search filters on `lower(city)` and a
+btree on `city` cannot answer that.
+
+### The two that were built, measured, and rejected
+
+This is the half of an indexing pass that usually goes unrecorded, and it is
+where the two findings worth reading are.
+
+**`bookings (id) INCLUDE (starts_at, ends_at, status, expires_at)`**, for the
+equipment sweep line. The planner adopted it — `Index Only Scan`, heap fetches
+gone, 2,267 buffers down to 1,849 — and it bought no time at all: median 2.75 ms
+without it against 3.75 ms with it over five runs each. The pages it avoided
+were already resident in `shared_buffers`, so the saving was a pointer chase,
+while the index-only scan added visibility-map checks. Against that, 16 MB of
+index maintained on every booking insert, on the hold path, on the one endpoint
+already missing its target. **A plan can improve on paper and lose on the
+clock, and buffers are the right signal only until they stop being the
+bottleneck.**
+
+**`venues (lower(city))`**, for cross-venue search. This one moved the plan
+hard — 253 buffers to 23, nested loop to hash join — with an `idx_scan` of
+exactly **zero**. It was never used as an index. What it supplied was an
+*estimate*: Postgres collects statistics on indexed expressions, and without one
+the planner guessed that `lower(city) = 'karachi'` matched a single venue rather
+than fourteen, then chose a plan built for one row and nest-looped into `rooms`
+fourteen times. The 40-row `venues` table was always going to be sequentially
+scanned either way.
+
+So the correct object is not an index:
+
+```sql
+CREATE STATISTICS venues_city_lower_stats ON lower(city) FROM venues;
+```
+
+Identical plan, identical 23 buffers, nothing to maintain on writes. **Search
+had a statistics problem wearing an index problem's clothes.** Had the
+functional index simply been kept because "the plan improved", the repository
+would carry a permanently unused 16 kB index and the actual cause would never
+have been found — and at 4,000 venues, where the estimate matters *and* the
+access path starts to, the wrong lesson would have been on file.
+
+### The one that needed nothing
+
+**Room availability over a 7-day range** — the endpoint with the tightest read
+target — was already optimal and got no new index. `no_room_overlap`'s gist on
+`(room_id, slot)` is exactly the right shape for it: equality on the leading key,
+range on the second, 28 buffers to find 6 rows in 250,000. The constraint that
+*is* INV-1 is also this query's index. One object, two jobs, and it is worth
+saying out loud because it was not designed for: the exclusion constraint was
+chosen in P0 for correctness under concurrency, and the read performance is a
+dividend.
+
+### Two ways the measurement itself was wrong first
+
+Recorded because a benchmark that measures the wrong query is worse than none.
+
+1. The capture script wrote `freeRoomIds` as a correlated subquery. The real
+   code passes a literal array. The two produce entirely different plans — with
+   literals the planner can at least consider driving the gist per room — so the
+   first Q3 numbers described a query the application never issues.
+2. It aimed the availability window at `now() + 2 days` and hit a period every
+   venue in the city was closed for, producing a zero-row plan. Proving a range
+   empty is the cheap case; the script now anchors its window on a real future
+   booking.
+
+### What is deliberately not indexed
+
+`booking_line_items.equipment_type_id` already has an index and the sweep line
+uses it; the sweep's remaining cost is the 563 primary-key lookups into
+`bookings` that follow, and no index on `bookings` fixes that — the selective
+predicate is on `bookings.starts_at`/`ends_at` while the entry point is a line
+item. The fix is a schema change, not an index, and it is §8's first entry.
 
 ---
 
@@ -577,8 +687,229 @@ payments exist: expiry is a one-way door.
 
 ## 8. What Breaks at 100x
 
-*Stub — P9. The first three things that fall over at 25 million bookings, and
-what to do about each.*
+25 million bookings instead of 250,000.
+
+Everything below is grounded in a plan captured at 250,000 rows, and where a
+claim needed a bigger number than the fixture provides, the number was
+*measured* — by widening the query's own scan until it saw what a 100× denser
+platform would put in front of it — rather than multiplied on paper.
+
+The useful property shared by all three is that each has a cost which grows with
+something unbounded while its answer stays the same size. That is what makes
+them cliffs rather than slopes, and it is why "buy a bigger box" is the wrong
+answer to all three.
+
+Ordered by which is hit first.
+
+---
+
+### 1. Cross-venue search's availability filter
+
+**`AvailabilityService.freeRoomIds`, called by `SearchService.search`.**
+
+The query asks "which of these ≤2,000 candidate rooms have nothing booked in
+this window". It is answered by a gist scan over *time*, with room membership
+applied afterwards as a filter, because search holds a list of room ids and no
+gist index can use a list as a leading equality key (§5).
+
+Its cost is therefore a function of how many bookings exist in that window
+**across the entire platform**, while its answer is bounded by the candidate
+list. Those two quantities have nothing to do with each other, and only one of
+them grows.
+
+Measured by widening the window on the real query until the scan sees what 100×
+density would put in a two-hour one:
+
+| window | active bookings scanned | rows returned | buffers | time |
+| --- | --- | --- | --- | --- |
+| 2 h 15 m (the benchmarked case) | 181 | 74 | 183 | 0.45 ms |
+| 30 days | 3,150 | 250 (saturated) | 1,368 | 5.6 ms |
+| 180 days | 18,501 | 250 (saturated) | 2,135 | 10.5 ms |
+
+The answer stops changing at 250 — the candidate count — while the scan grows by
+a factor of 102. **Today's 180-day plan is tomorrow's two-hour plan**: at 100×
+density the same two-hour window holds roughly 18,000 active bookings, so the
+bottom row is a measurement of the future, not a projection of it. A 23×
+slowdown on a Tier 1 read path that currently has 71% headroom against its
+500 ms target — which means it survives one order of magnitude and not two.
+
+**What I would do.** Partition `bookings` by `starts_at`, monthly. Every query
+that touches this table is already time-qualified — availability, search, the
+revenue report, the sweeper — so pruning turns "scan the platform's bookings in
+this window" into "scan one or two partitions", and each partition's index stays
+small enough to be genuinely resident. Archiving old bookings also becomes a
+`DETACH` rather than a delete of twenty million rows.
+
+The cost is real and worth stating plainly: `no_room_overlap` is an EXCLUDE
+constraint, and Postgres cannot enforce one *across* partitions unless the
+partition key is part of it. Partitioning on `starts_at` alone would therefore
+break INV-1 — overlap would be enforced within a month but not across a month
+boundary, which is exactly where a booking spanning midnight on the 31st lives.
+The workable version partitions by `RANGE (starts_at)`, enforces overlap per
+partition, and adds a CHECK that no booking crosses a partition edge — safe
+because bookings are at most 8 hours long. That is a real migration with a real
+chance of getting INV-1 wrong, which is why it is written down here rather than
+attempted in a performance phase.
+
+The cheap intermediate, if that is too big a step: cap the availability window
+in `SearchSchema`, which is currently unbounded where `AvailabilitySchema` caps
+at 31 days. That bounds the damage without fixing the shape.
+
+---
+
+### 2. The equipment sweep line, inside the hold transaction
+
+**`equipment-availability.ts :: peakConcurrentUsage`.** Yes — this is the one,
+and the honest answer is worse than "it gets slow".
+
+The sweep line is the correct algorithm for INV-2 and nothing here argues
+otherwise; a `SUM(quantity)` would be fast and wrong. The problem is the join
+that feeds it. The entry point is `booking_line_items.equipment_type_id` and the
+selective predicate is a time range on `bookings`, so the two sit on opposite
+sides of a join and **the planner has two plans available, both unbounded**:
+
+```
+1 equipment type   (663 line items)
+  -> Nested Loop, 663 Index Scans on bookings_pkey       2,670 buffers   2.2 ms
+     cost is proportional to the type's LIFETIME line-item count
+
+5 equipment types  (2,971 line items)
+  -> Hash Join
+     -> Bitmap Index Scan on bookings_status_expires_idx
+          actual rows=54,589   Rows Removed by Filter: 54,401
+                                                         2,358 buffers  10.7 ms
+     cost is proportional to the PLATFORM's total active bookings
+
+20 equipment types (10,757 line items)
+  -> same shape                                          2,523 buffers  14.0 ms
+```
+
+The answer, in all three cases, is between one and nine rows.
+
+Read the middle plan again: to find 162 relevant bookings it scanned 54,589 and
+discarded 54,401. And the planner *flips between* the two plans depending on how
+many equipment types the booking names — so a customer adding a second camera to
+their cart changes the query's asymptotic behaviour.
+
+Neither plan is bounded by the answer. The nested loop grows with an equipment
+type's history, which never shrinks: a camera fleet does not shed the bookings it
+took last year. The hash join grows with platform size. At 100×, one of them is
+scanning 5.5 million rows and the other is doing 66,000 index lookups.
+
+**And it runs inside the hold transaction, holding `SELECT ... FOR UPDATE` on
+the `equipment_types` row.** That is what makes this the most serious of the
+three. Every millisecond here is a millisecond in which every other hold for that
+equipment type is blocked, so the cost does not surface as latency — it surfaces
+as a throughput ceiling. At today's 2.2 ms a type admits roughly 450 holds a
+second; at 100× the nested-loop plan puts that near 4.5. A popular camera on a
+busy Saturday becomes a queue.
+
+**What I would do.** Denormalise `starts_at`, `ends_at` and `status` onto
+`booking_line_items`, and index `(equipment_type_id, starts_at)` partial on the
+active statuses. The sweep then reads one table with both the entry point and the
+selective predicate on the same index, and its cost becomes proportional to line
+items *in the window* — the only quantity here that is bounded.
+
+The standard objection to denormalisation is drift, and here it is answerable
+rather than waved away: `starts_at` and `ends_at` are immutable after creation —
+nothing in the state machine ever writes them again — so those two cannot drift
+by construction. `status` can, and it is the one that needs a trigger on
+`bookings` to propagate. One trigger is a better thing to own than a query with
+two unbounded plans on the write path.
+
+Second, smaller, and independent: the expiry predicate is spelled
+`NOT (status = 'HELD' AND expires_at IS NOT NULL AND expires_at <= now())`,
+which is not sargable, and is part of why the planner reaches for
+`bookings_status_expires_idx` and then throws away 99.7% of what it read.
+Rewriting it as `(status <> 'HELD' OR expires_at > now())` lets a partial index
+cover it.
+
+---
+
+### 3. The reconciliation endpoint — INV-5's only evidence
+
+**`GET /admin/reconciliation`.** The endpoint whose entire purpose is to prove
+that no money was lost. It runs a union of seven discrepancy subqueries across
+`payments`, `payment_events`, `webhook_deliveries` and `bookings` — and runs it
+**twice**, once to count every discrepancy by kind and once to return a page of
+them. The second pass was added deliberately in P4, because the one-pass version
+reported `LIMIT 500` as the total, and a report whose whole job is to be
+trustworthy was silently truncating its own headline number.
+
+Measured now, at 250,000 bookings and 207,519 payments, over an all-time window:
+
+```
+reconciliation total: 5.279s   http=200
+reconciliation total: 5.434s   http=200
+reconciliation total: 5.049s   http=200
+```
+
+Five seconds, already. `payments` is 96 MB, `payment_events` 58 MB, the whole
+database 279 MB — all of it comfortably inside `shared_buffers`. At 100× that is
+roughly 9.6 GB of payments and 5.8 GB of events against a 256 MB buffer pool,
+scanned twice. This does not degrade to thirty seconds; it degrades to reading
+fifteen gigabytes off disk twice per request, and it will hit nginx's 30-second
+`proxy_read_timeout` long before it returns.
+
+The failure is not that an admin page gets slow. It is that **the only mechanism
+which demonstrates INV-5 stops being runnable**, and an invariant you cannot
+check is an invariant you no longer know you have.
+
+**What I would do.** Make reconciliation incremental instead of a full sweep.
+Every discrepancy class is of the form "this row has been in state X for longer
+than a grace period", which is a statement about a *window* rather than about all
+of history — the endpoint already takes `from`/`to`, and the all-history call
+above is the pathological use of it. Concretely: index `payments (updated_at)`
+and `webhook_deliveries (received_at) WHERE processed_at IS NULL` so a windowed
+query is a range scan; keep a materialised marker of "reconciled clean up to
+timestamp T"; and have the live query cover only T to now. Anything before T was
+already proved clean and does not need proving again every time someone opens the
+page.
+
+That also buys the property the current design lacks: a reconciliation run whose
+cost is bounded by elapsed time since the last run, rather than by the platform's
+entire lifetime.
+
+---
+
+### What is NOT on this list, and why
+
+**The per-room advisory lock is not a scaling problem.** Worth saying explicitly,
+because it looks like the obvious suspect — a lock on the write path, taken by
+every single hold.
+
+It is keyed on `hashtext(room_id)`, so contention on any one key is contention
+between customers trying to book *the same room at the same moment*. That is
+irreducible: it is the serialisation INV-1 requires, and every correct
+implementation has it somewhere. The number of keys grows with the number of
+rooms, so 100× the platform is 100× the locks, not 100× the contention per lock.
+The concurrency proof already exercises the worst case — 200 requests on one key
+— and it resolves in about 2.5 seconds with zero 5xx, at 250,000 rows as well as
+at 25,000 (LOAD_TEST.md §7).
+
+What *can* go wrong is lock **hold time**, and that is item 2 wearing the lock's
+clothing: the advisory lock is held for the whole transaction, and the equipment
+sweep line is inside it. Fixing the sweep line fixes the lock. Replacing the lock
+would not fix the sweep line, and would reintroduce the deadlock storm it was
+added to remove (§3, "The fix that worked").
+
+**`no_room_overlap` itself is a slope rather than a cliff — but it is the next
+one after these three.** It is 5.9 MB at 250,000 rows, so roughly 590 MB at 25
+million, against `shared_buffers=256MB`. Today Q1 answers in 28 buffers, all
+cache hits; past the point where the index stops fitting, every hold insert and
+every availability read starts touching disk. It ranks fourth because the fix is
+the same partitioning work as item 1 — per-partition indexes are small — and
+because 256 MB is a compose-file default rather than a considered production
+number.
+
+**The hold sweeper's throughput is fifth.** It flips at most `BATCH_SIZE = 500`
+holds per tick every 15 seconds: 2,000 a minute, platform-wide, from one elected
+replica. At 100× the abandoned-hold rate that is not enough, and lapsed holds
+would accumulate faster than they are cleared. The fix is genuinely easy — raise
+the batch, shorten the tick, or shard the sweeper by room-id range — and it ranks
+last because INV-1 does not depend on the sweeper being timely. The
+in-transaction expiry in the hold path is what guarantees correctness; the
+sweeper only bounds how long a lapsed row sits there (§3, "Hold expiry").
 
 ---
 
