@@ -277,12 +277,12 @@ integrity work lands separately once the booking core exists.
       green with Postgres up and the platform cancellation policy present. The
       database is still unseeded.
 - [~] Deployed Paygate URL — https://atrium-paygate.onrender.com — live, chaos
-      on, seed `atrium-render`, test endpoints off (permanently, by Dockerfile).
-      **`callback_url_configured: false`**: `PAYGATE_CALLBACK_URL` is
-      `sync: false` in `render.yaml` and was never pasted from the dashboard, so
-      the deployed webhook channel delivers nothing and every payment resolves
-      through the poll fallback instead. One dashboard paste — see the README's
-      Known Issues.
+      on, seed `atrium-render`, test endpoints off (permanently, by Dockerfile),
+      `callback_url_configured: true`. Both `sync: false` variables are set:
+      Paygate's `PAYGATE_CALLBACK_URL` and the API's `PAYGATE_BASE_URL`.
+      Not yet *exercised* on the deployed pair, because that database is
+      unseeded and there is no room to book — the payment round trip is proven
+      locally by `pnpm e2e` and remains unrun in production.
 - [~] Deployed frontend URL — https://project-atrium.vercel.app — live; the
       console itself is P7
 - [x] `README.md` (stub with Known Issues; final pass in P8)

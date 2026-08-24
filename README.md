@@ -40,7 +40,7 @@ see what the deployed provider will and will not do:
 
 ```json
 {"status":"ok","service":"paygate","chaos":"on","seed":"atrium-render",
- "callback_url_configured":false,"test_endpoints":"off"}
+ "callback_url_configured":true,"test_endpoints":"off"}
 ```
 
 `test_endpoints: off` is deliberate and permanent — `NODE_ENV=production` is
@@ -48,7 +48,10 @@ baked into Paygate's Dockerfile and it refuses to register `/paygate/_test/*`
 there regardless of the flag, so the deployed instance is the chaotic provider
 the brief describes and deterministic scenarios stay local.
 
-**`callback_url_configured: false` is not deliberate.** See Known Issues.
+`callback_url_configured: true` says only that a callback URL is set, not that
+it points at this API — the value is not exposed, and the deployed database is
+unseeded, so the round trip has never actually run on the deployed pair. The
+webhook path is proven locally by `pnpm e2e`, against a stack where it does.
 
 Four things a reviewer should know before trying these:
 
@@ -192,26 +195,6 @@ nginx/nginx.conf   round-robin LB over the three replicas
 
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
-
-- **The deployed Paygate has no callback URL, so the webhook path is inert in
-  production.** `/health` on the deployed instance reports
-  `callback_url_configured: false`. Render assigns unguessable hostnames, so
-  `PAYGATE_CALLBACK_URL` is declared `sync: false` in `render.yaml` and has to be
-  pasted from the dashboard after the first deploy; that paste has not happened.
-
-  What it means in practice: a charge against the deployed stack is accepted and
-  captured, and then no `charge.succeeded` webhook is ever delivered. The booking
-  is still confirmed, because the API polls the provider after
-  `CHARGE_POLL_AFTER_SECONDS` — that pull path exists precisely because the
-  channel can lose a message permanently (`ARCHITECTURE.md` §4, `DECISIONS.md`
-  10) — so the deployed system is correct but slow, and it is exercising the
-  fallback on every payment instead of the primary route.
-
-  It also means **INV-3 cannot be demonstrated on the deployed instance**:
-  duplicate and out-of-order delivery are properties of a channel that is not
-  currently delivering. INV-3 is proven locally by `pnpm e2e`, against a stack
-  where the callback is configured. Fixing it is one paste into the Render
-  dashboard, not a code change.
 
 **Current phase: P6 complete — performance, measured.** P6 and P7 swapped
 places: performance held the remaining Tier 1 risk, the console holds none of
