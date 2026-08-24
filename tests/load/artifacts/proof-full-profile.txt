@@ -1,0 +1,75 @@
+ WARN  Unsupported engine: wanted: {"node":">=26"} (current: {"node":"v22.20.0","pnpm":"10.33.0"})
+
+> project-atrium@0.0.0 proof F:\AdaptTechnologies\Interview\ProjectAttrium
+> pnpm --filter @atrium/tests-concurrency proof
+
+.                                        |  WARN  Unsupported engine: wanted: {"node":">=26"} (current: {"node":"v22.20.0","pnpm":"10.33.0"})
+
+> @atrium/tests-concurrency@0.0.0 proof F:\AdaptTechnologies\Interview\ProjectAttrium\tests\concurrency
+> vitest run --config vitest.proof.config.ts --reporter=verbose
+
+
+ RUN  v4.1.11 F:/AdaptTechnologies/Interview/ProjectAttrium/tests/concurrency
+
+stdout | src/hold.proof.test.ts
+
+==============================================================================
+ATRIUM CONCURRENCY PROOF
+==============================================================================
+target            http://localhost:8080  (nginx -> api1, api2, api3)
+concurrency       200 requests, released together
+contended room    18a208f4-a973-4703-b629-85405a1102e8
+contended slot    2026-08-26T23:00:00.000Z .. 2026-08-27T00:00:00.000Z
+equipment type    30283f09-47bb-4094-b813-f30d40273e26  (units_owned = 3)
+
+
+stdout | src/hold.proof.test.ts > INV-1 — rooms never double book > admits exactly one of 200 concurrent holds for the same slot
+-- INV-1: same room, same one-hour slot --------------------------------
+  responses        201 x1, 409 x199
+  replica spread   api1=68 api2=65 api3=67
+  distinct booking 3a2b5c2c-5674-470d-8450-dc5507156cc4
+
+
+ ✓ src/hold.proof.test.ts > INV-1 — rooms never double book > admits exactly one of 200 concurrent holds for the same slot 2506ms
+stdout | src/hold.proof.test.ts > INV-1 — rooms never double book > the database agrees — one active booking for that room and slot
+-- INV-1 re-read from Postgres ----------------------------------------
+  active bookings overlapping the slot: 1
+  ids: ["3a2b5c2c-5674-470d-8450-dc5507156cc4"]
+
+
+ ✓ src/hold.proof.test.ts > INV-1 — rooms never double book > the database agrees — one active booking for that room and slot 23ms
+stdout | src/hold.proof.test.ts > INV-2 — equipment never oversells at any instant > admits at most 3 of 200 concurrent holds for 3 units
+-- INV-2: 200 distinct rooms, 1 unit each, 3 units owned ----------
+  responses        201 x3, 409 x197
+  replica spread   api1=65 api2=67 api3=68
+  admitted         3 (ceiling 3)
+
+
+ ✓ src/hold.proof.test.ts > INV-2 — equipment never oversells at any instant > admits at most 3 of 200 concurrent holds for 3 units 2194ms
+stdout | src/hold.proof.test.ts > INV-2 — equipment never oversells at any instant > the database agrees — peak concurrent usage never exceeds units_owned
+-- INV-2 re-read from Postgres ----------------------------------------
+  units_owned                    3
+  peak concurrent usage          3
+  total units reserved (rows)    3
+
+
+stdout | src/hold.proof.test.ts > the run itself > produced no 5xx anywhere and touched all three replicas
+-- run summary --------------------------------------------------------
+  total requests   400
+  5xx responses    0
+  replicas seen    api1, api2, api3
+  per replica      api1=133 api2=132 api3=135
+
+
+stdout | src/hold.proof.test.ts
+==============================================================================
+
+
+ ✓ src/hold.proof.test.ts > INV-2 — equipment never oversells at any instant > the database agrees — peak concurrent usage never exceeds units_owned 16ms
+ ✓ src/hold.proof.test.ts > the run itself > produced no 5xx anywhere and touched all three replicas 3ms
+
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+   Start at  03:08:36
+   Duration  8.25s (transform 195ms, setup 0ms, import 2.67s, tests 5.12s, environment 0ms)
+

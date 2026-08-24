@@ -198,13 +198,23 @@ describe('reports', () => {
 
   it('GET /venues/reports/revenue reports the token venue, and a venue_id in the query changes nothing', async () => {
     recordProbe('GET /venues/reports/revenue');
-    const range = 'from=2020-01-01T00:00:00.000Z&to=2100-01-01T00:00:00.000Z';
+    // Sixty days forward, not the century-wide window the reconciliation probe
+    // above uses. This report caps its range at 366 days and answers 422 beyond
+    // it, and the window still has to CONTAIN the fixture bookings — they sit
+    // 10 to 12 days out — or `by_room` comes back empty and the no-leak
+    // assertion passes without having had anything to leak.
+    const now = Date.now();
+    const range =
+      `from=${new Date(now - 86_400_000).toISOString()}` +
+      `&to=${new Date(now + 60 * 86_400_000).toISOString()}`;
 
     const mine = await call('GET', `/venues/reports/revenue?${range}`, world.a.admin);
     expect(mine.status).toBe(200);
     expect((mine.json as { venue_id: string }).venue_id).toBe(world.a.venueId);
     // The report names rooms, so B's room id is exactly the kind of thing that
-    // would leak if the scope came from anywhere but the token.
+    // would leak if the scope came from anywhere but the token — and A's own
+    // room being present is what makes its absence meaningful.
+    expect(mine.text).toContain(world.a.roomId);
     assertNoLeak(mine, secretsOf(world.b));
 
     // There is no `venue_id` parameter on this route. Sending one anyway is the

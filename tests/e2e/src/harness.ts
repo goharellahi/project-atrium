@@ -192,8 +192,12 @@ export async function api<T = unknown>(
   path: string,
   token: string | null,
   body?: unknown,
+  extraHeaders: Record<string, string> = {},
 ): Promise<Response<T>> {
-  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    ...extraHeaders,
+  };
   if (token) headers.authorization = `Bearer ${token}`;
 
   const res = await fetch(`${BASE_URL}${path}`, {
@@ -265,13 +269,20 @@ export interface PayResponse {
  * matter how many times it goes round — which is the assertion the INV-3
  * scenario then makes explicitly against Paygate's own records.
  */
-export async function pay(world: World, bookingId: string, attempts = 6): Promise<PayResponse> {
+export async function pay(
+  world: World,
+  bookingId: string,
+  attempts = 6,
+  headers: Record<string, string> = {},
+): Promise<PayResponse> {
   let last = '';
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const res = await api<PayResponse>(
       'POST',
       `/bookings/${bookingId}/pay`,
       world.customer.token,
+      undefined,
+      headers,
     );
     if (res.status === 200) return res.body;
     last = `${res.status} ${res.text}`;
