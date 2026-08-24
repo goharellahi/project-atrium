@@ -1,0 +1,41 @@
+ WARN  Unsupported engine: wanted: {"node":">=26"} (current: {"node":"v22.20.0","pnpm":"10.33.0"})
+
+> project-atrium@0.0.0 e2e F:\AdaptTechnologies\Interview\ProjectAttrium
+> pnpm --filter @atrium/tests-e2e e2e
+
+.                                        |  WARN  Unsupported engine: wanted: {"node":">=26"} (current: {"node":"v22.20.0","pnpm":"10.33.0"})
+
+> @atrium/tests-e2e@0.0.0 e2e F:\AdaptTechnologies\Interview\ProjectAttrium\tests\e2e
+> vitest run --config vitest.e2e.config.ts --reporter=verbose
+
+
+ RUN  v4.1.11 F:/AdaptTechnologies/Interview/ProjectAttrium/tests/e2e
+
+ ✓ src/payments.e2e.test.ts > happy path: hold -> pay -> webhook -> CONFIRMED -> cancel -> refund > holds, charges, and confirms on the webhook 338ms
+ ✓ src/payments.e2e.test.ts > happy path: hold -> pay -> webhook -> CONFIRMED -> cancel -> refund > froze the cancellation policy onto the booking at confirmation 4ms
+ ✓ src/payments.e2e.test.ts > happy path: hold -> pay -> webhook -> CONFIRMED -> cancel -> refund > captured exactly one payment for the booking 7ms
+ ✓ src/payments.e2e.test.ts > happy path: hold -> pay -> webhook -> CONFIRMED -> cancel -> refund > cancels more than 48h out and refunds 100% of both components 68ms
+ ✓ src/payments.e2e.test.ts > happy path: hold -> pay -> webhook -> CONFIRMED -> cancel -> refund > settles the refund and moves the booking to REFUNDED 295ms
+ ✓ src/payments.e2e.test.ts > happy path: hold -> pay -> webhook -> CONFIRMED -> cancel -> refund > double-clicking cancel refunds once 55ms
+ ✓ src/payments.e2e.test.ts > INV-3: one charge and one confirmation, however many deliveries arrive > applies three identical charge.succeeded deliveries exactly once 115ms
+ ✓ src/payments.e2e.test.ts > INV-3: one charge and one confirmation, however many deliveries arrive > wrote exactly one payment_events row for the event 4ms
+ ✓ src/payments.e2e.test.ts > INV-3: one charge and one confirmation, however many deliveries arrive > recorded every delivery, and applied only the first 7ms
+ ✓ src/payments.e2e.test.ts > INV-3: one charge and one confirmation, however many deliveries arrive > never created a second charge at the provider 11ms
+ ✓ src/payments.e2e.test.ts > INV-4: payment succeeds against a hold that has already expired > does not confirm, and refunds automatically 353ms
+ ✓ src/payments.e2e.test.ts > INV-4: payment succeeds against a hold that has already expired > issued a refund against the captured charge 15ms
+ ✓ src/payments.e2e.test.ts > INV-4: payment succeeds against a hold that has already expired > recorded the whole sequence in the audit trail, in order 10ms
+ ✓ src/payments.e2e.test.ts > INV-4: payment succeeds against a hold that has already expired > settles the refund and records it against the terminal booking 283ms
+ ✓ src/payments.e2e.test.ts > a webhook with a bad signature is rejected, logged, and never processed > answers 401 and records the attempt 399ms
+ ✓ src/payments.e2e.test.ts > a webhook with a bad signature is rejected, logged, and never processed > rejects a webhook with no signature header at all 10ms
+ ✓ src/payments.e2e.test.ts > a webhook with a bad signature is rejected, logged, and never processed > verifies over the raw bytes — a re-serialised body does not verify 9ms
+ ✓ src/payments.e2e.test.ts > a charge whose webhook is lost is resolved by asking the provider > confirms the booking without ever receiving the delivery 100688ms
+ ✓ src/payments.e2e.test.ts > INV-5: everything above reconciles to zero > reports no discrepancies across the whole run 164ms
+ ✓ src/payments.e2e.test.ts > a correlation id supplied by the client reaches the webhook > is stored by the provider, echoed on the delivery, and recorded by the API 324ms
+ ✓ src/payments.e2e.test.ts > a webhook for an unknown charge is neither 500ed nor dropped > answers 200 and records the delivery with its reference 302ms
+ ✓ src/payments.e2e.test.ts > a webhook for an unknown charge is neither 500ed nor dropped > and reconciliation catches it 175ms
+
+ Test Files  1 passed (1)
+      Tests  22 passed (22)
+   Start at  12:13:56
+   Duration  105.04s (transform 87ms, setup 0ms, import 175ms, tests 103.94s, environment 0ms)
+

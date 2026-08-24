@@ -419,9 +419,33 @@ describe('a webhook with a bad signature is rejected, logged, and never processe
     const payment = await pay(world, hold.id);
     const chargeId = payment.charge_id!;
 
-    const before = await db.query<{ n: string }>(
-      `SELECT COUNT(*)::text AS n FROM payment_events WHERE charge_id = $1`,
-      [chargeId],
+    // Let the legitimate effect land FIRST, and wait for it.
+    //
+    // This assertion used to snapshot the ledger straight after `pay()` and
+    // compare it after the corrupted delivery. That measures "no payment_events
+    // row appeared", which is not the claim — Paygate's own NATURAL delivery for
+    // this charge is in flight at the same time, and when it arrived between the
+    // two counts the test failed with `expected '1' to be '0'` for a reason
+    // that has nothing to do with signatures. Found in P6; P5 shipped it green
+    // because the natural delivery happened to win the race every time it ran.
+    //
+    // Forcing a valid delivery and waiting for exactly one ledger row makes the
+    // baseline deterministic, and the assertion then says what it means: after
+    // the corrupted delivery the count is STILL one. Late natural duplicates
+    // cannot disturb it either, because UNIQUE (charge_id, event) is what INV-3
+    // rests on — which makes this a stronger test than the one it replaces, not
+    // a relaxed one.
+    await deliver(chargeId, { event: 'charge.succeeded' });
+    const before = await waitFor(
+      'the legitimate charge.succeeded to be applied exactly once',
+      async () =>
+        (
+          await db.query<{ n: string }>(
+            `SELECT COUNT(*)::text AS n FROM payment_events WHERE charge_id = $1`,
+            [chargeId],
+          )
+        ).rows[0]!,
+      (row) => row.n === '1',
     );
 
     const [delivered] = await deliver(chargeId, {
@@ -457,7 +481,7 @@ describe('a webhook with a bad signature is rejected, logged, and never processe
       `SELECT COUNT(*)::text AS n FROM payment_events WHERE charge_id = $1`,
       [chargeId],
     );
-    expect(after.rows[0]!.n).toBe(before.rows[0]!.n);
+    expect(after.rows[0]!.n).toBe(before.n);
   });
 
   it('rejects a webhook with no signature header at all', async () => {
@@ -571,6 +595,79 @@ describe('INV-5: everything above reconciles to zero', () => {
     expect(report.by_kind).toEqual({});
     expect(report.truncated).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// 5b. The correlation id survives into the webhook path
+// ---------------------------------------------------------------------------
+
+describe('a correlation id supplied by the client reaches the webhook', () => {
+  /**
+   * The brief names this specifically and, until P6, nothing checked it.
+   *
+   * Every link existed — nginx passes X-Request-Id through, the middleware
+   * adopts it, PaygateClient forwards it on the charge, Paygate stores it and
+   * echoes it on delivery — but the id lived only in log lines. A chain of five
+   * hops with no assertion anywhere on it is a chain that is one refactor away
+   * from being four hops and a generated UUID that correlates with nothing, and
+   * nothing would have failed.
+   *
+   * The assertion is made in two places for a reason. Paygate's own record
+   * proves the id reached the PROVIDER and was echoed outbound; the
+   * `webhook_deliveries` row proves the API adopted it again on the way back
+   * IN. Either one alone leaves half the round trip unwitnessed.
+   *
+   * No separate negative case is needed to rule out the column simply being
+   * filled with a locally minted id: the value asserted here is a random UUID
+   * this test generated, and a `randomUUID()` in the middleware cannot equal
+   * it. The assertion is that the id is THE one that went in, not merely that
+   * the column is non-empty.
+   */
+  it('is stored by the provider, echoed on the delivery, and recorded by the API', async () => {
+    const correlationId = `atrium-e2e-${randomUUID()}`;
+
+    const hold = await createHold(world, 7, 96);
+    const payment = await pay(world, hold.id, 6, { 'x-request-id': correlationId });
+    expect(payment.charge_id).toBeTruthy();
+
+    // Hop 1-3: client -> nginx -> API -> Paygate. Paygate stores what it was
+    // sent on the charge request.
+    const charge = await paygate<{ correlation_id: string | null }>(
+      `/paygate/charges/${payment.charge_id}`,
+    );
+    expect(charge.status).toBe(200);
+    expect(charge.body.correlation_id).toBe(correlationId);
+
+    // Hop 4-5: Paygate -> nginx -> API, on a webhook that may land on a
+    // different replica than the one that charged. Forced rather than waited
+    // for: the natural delivery is subject to the 25% race and 5% delay
+    // branches, and a test that waits on a probability is a coin flip.
+    await deliver(payment.charge_id!, { event: 'charge.succeeded' });
+
+    const recorded = await waitFor(
+      'a delivery for this charge to be recorded with the correlation id',
+      async () => {
+        const rows = await db.query<{ correlation_id: string | null; delivery_id: string }>(
+          `SELECT correlation_id, delivery_id
+             FROM webhook_deliveries
+            WHERE charge_id = $1 AND signature_valid
+            ORDER BY received_at DESC`,
+          [payment.charge_id],
+        );
+        return rows.rows;
+      },
+      (rows) => rows.length > 0 && rows.some((r) => r.correlation_id === correlationId),
+    );
+
+    // EVERY signed delivery for this charge carries it, not merely one of them.
+    // Paygate echoes the id off the charge, so a duplicate delivery drawn from
+    // the natural 30% branch is covered by the same assertion — which is the
+    // case that matters, since that is the delivery most likely to be traced.
+    expect(recorded.every((r) => r.correlation_id === correlationId)).toBe(true);
+
+    await waitForStatus(db, hold.id, ['CONFIRMED']);
+  }, 120_000);
+
 });
 
 // ---------------------------------------------------------------------------

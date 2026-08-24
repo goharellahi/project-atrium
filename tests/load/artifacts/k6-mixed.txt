@@ -1,0 +1,465 @@
+
+         /\      Grafana   /‾‾/  
+    /\  /  \     |\  __   /  /   
+   /  \/    \    | |/ /  /   ‾‾\ 
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/ 
+
+
+     execution: local
+        script: /scripts/atrium.js
+        output: -
+
+     scenarios: (100.00%) 4 scenarios, 55 max VUs, 1m30s max duration (incl. graceful stop):
+              * availability: 10 looping VUs for 1m0s (exec: availability, gracefulStop: 30s)
+              * hold: 5.00 iterations/s for 1m0s (maxVUs: 10-30, exec: hold, gracefulStop: 30s)
+              * revenue: 5 looping VUs for 1m0s (exec: revenue, gracefulStop: 30s)
+              * search: 10 looping VUs for 1m0s (exec: search, gracefulStop: 30s)
+
+
+Run            [ 100% ] setup()
+availability   [   0% ]
+hold           [   0% ]
+revenue        [   0% ]
+search         [   0% ]
+time="2026-08-23T22:03:43Z" level=info msg="setup: 60 rooms, 5619 non-overlapping slots, city=Dubai" source=console
+
+running (0m02.0s), 27/35 VUs, 16 complete and 0 interrupted iterations
+availability   [   0% ] 10 VUs     0m00.3s/1m0s 
+hold           [   0% ] 02/10 VUs  0m00.3s/1m0s  5.00 iters/s
+revenue        [   0% ] 5 VUs      0m00.3s/1m0s 
+search         [   0% ] 10 VUs     0m00.3s/1m0s 
+
+running (0m03.0s), 26/35 VUs, 226 complete and 0 interrupted iterations
+availability   [   2% ] 10 VUs     0m01.3s/1m0s 
+hold           [   2% ] 01/10 VUs  0m01.3s/1m0s  5.00 iters/s
+revenue        [   2% ] 5 VUs      0m01.3s/1m0s 
+search         [   2% ] 10 VUs     0m01.3s/1m0s 
+
+running (0m04.0s), 26/35 VUs, 546 complete and 0 interrupted iterations
+availability   [   4% ] 10 VUs     0m02.3s/1m0s 
+hold           [   4% ] 01/10 VUs  0m02.3s/1m0s  5.00 iters/s
+revenue        [   4% ] 5 VUs      0m02.3s/1m0s 
+search         [   4% ] 10 VUs     0m02.3s/1m0s 
+
+running (0m05.0s), 29/35 VUs, 776 complete and 0 interrupted iterations
+availability   [   5% ] 10 VUs     0m03.3s/1m0s 
+hold           [   5% ] 04/10 VUs  0m03.3s/1m0s  5.00 iters/s
+revenue        [   5% ] 5 VUs      0m03.3s/1m0s 
+search         [   5% ] 10 VUs     0m03.3s/1m0s 
+
+running (0m06.0s), 25/35 VUs, 1085 complete and 0 interrupted iterations
+availability   [   7% ] 10 VUs     0m04.3s/1m0s 
+hold           [   7% ] 00/10 VUs  0m04.3s/1m0s  5.00 iters/s
+revenue        [   7% ] 5 VUs      0m04.3s/1m0s 
+search         [   7% ] 10 VUs     0m04.3s/1m0s 
+
+running (0m07.0s), 25/35 VUs, 1445 complete and 0 interrupted iterations
+availability   [   9% ] 10 VUs     0m05.3s/1m0s 
+hold           [   9% ] 00/10 VUs  0m05.3s/1m0s  5.00 iters/s
+revenue        [   9% ] 5 VUs      0m05.3s/1m0s 
+search         [   9% ] 10 VUs     0m05.3s/1m0s 
+
+running (0m08.0s), 26/35 VUs, 1748 complete and 0 interrupted iterations
+availability   [  10% ] 10 VUs     0m06.3s/1m0s 
+hold           [  10% ] 01/10 VUs  0m06.3s/1m0s  5.00 iters/s
+revenue        [  10% ] 5 VUs      0m06.3s/1m0s 
+search         [  10% ] 10 VUs     0m06.3s/1m0s 
+
+running (0m09.0s), 27/35 VUs, 2042 complete and 0 interrupted iterations
+availability   [  12% ] 10 VUs     0m07.3s/1m0s 
+hold           [  12% ] 02/10 VUs  0m07.3s/1m0s  5.00 iters/s
+revenue        [  12% ] 5 VUs      0m07.3s/1m0s 
+search         [  12% ] 10 VUs     0m07.3s/1m0s 
+
+running (0m10.0s), 26/35 VUs, 2343 complete and 0 interrupted iterations
+availability   [  14% ] 10 VUs     0m08.3s/1m0s 
+hold           [  14% ] 01/10 VUs  0m08.3s/1m0s  5.00 iters/s
+revenue        [  14% ] 5 VUs      0m08.3s/1m0s 
+search         [  14% ] 10 VUs     0m08.3s/1m0s 
+
+running (0m11.0s), 25/35 VUs, 2727 complete and 0 interrupted iterations
+availability   [  15% ] 10 VUs     0m09.3s/1m0s 
+hold           [  15% ] 00/10 VUs  0m09.3s/1m0s  5.00 iters/s
+revenue        [  15% ] 5 VUs      0m09.3s/1m0s 
+search         [  15% ] 10 VUs     0m09.3s/1m0s 
+
+running (0m12.0s), 26/35 VUs, 3119 complete and 0 interrupted iterations
+availability   [  17% ] 10 VUs     0m10.3s/1m0s 
+hold           [  17% ] 01/10 VUs  0m10.3s/1m0s  5.00 iters/s
+revenue        [  17% ] 5 VUs      0m10.3s/1m0s 
+search         [  17% ] 10 VUs     0m10.3s/1m0s 
+
+running (0m13.0s), 26/35 VUs, 3479 complete and 0 interrupted iterations
+availability   [  19% ] 10 VUs     0m11.3s/1m0s 
+hold           [  19% ] 01/10 VUs  0m11.3s/1m0s  5.00 iters/s
+revenue        [  19% ] 5 VUs      0m11.3s/1m0s 
+search         [  19% ] 10 VUs     0m11.3s/1m0s 
+
+running (0m14.0s), 26/35 VUs, 3854 complete and 0 interrupted iterations
+availability   [  20% ] 10 VUs     0m12.3s/1m0s 
+hold           [  20% ] 01/10 VUs  0m12.3s/1m0s  5.00 iters/s
+revenue        [  20% ] 5 VUs      0m12.3s/1m0s 
+search         [  20% ] 10 VUs     0m12.3s/1m0s 
+
+running (0m15.0s), 26/35 VUs, 4099 complete and 0 interrupted iterations
+availability   [  22% ] 10 VUs     0m13.3s/1m0s 
+hold           [  22% ] 01/10 VUs  0m13.3s/1m0s  5.00 iters/s
+revenue        [  22% ] 5 VUs      0m13.3s/1m0s 
+search         [  22% ] 10 VUs     0m13.3s/1m0s 
+
+running (0m16.0s), 28/35 VUs, 4442 complete and 0 interrupted iterations
+availability   [  24% ] 10 VUs     0m14.3s/1m0s 
+hold           [  24% ] 03/10 VUs  0m14.3s/1m0s  5.00 iters/s
+revenue        [  24% ] 5 VUs      0m14.3s/1m0s 
+search         [  24% ] 10 VUs     0m14.3s/1m0s 
+
+running (0m17.0s), 25/35 VUs, 4840 complete and 0 interrupted iterations
+availability   [  25% ] 10 VUs     0m15.3s/1m0s 
+hold           [  25% ] 00/10 VUs  0m15.3s/1m0s  5.00 iters/s
+revenue        [  25% ] 5 VUs      0m15.3s/1m0s 
+search         [  25% ] 10 VUs     0m15.3s/1m0s 
+
+running (0m18.0s), 26/35 VUs, 5157 complete and 0 interrupted iterations
+availability   [  27% ] 10 VUs     0m16.3s/1m0s 
+hold           [  27% ] 01/10 VUs  0m16.3s/1m0s  5.00 iters/s
+revenue        [  27% ] 5 VUs      0m16.3s/1m0s 
+search         [  27% ] 10 VUs     0m16.3s/1m0s 
+
+running (0m19.0s), 25/35 VUs, 5481 complete and 0 interrupted iterations
+availability   [  29% ] 10 VUs     0m17.3s/1m0s 
+hold           [  29% ] 00/10 VUs  0m17.3s/1m0s  5.00 iters/s
+revenue        [  29% ] 5 VUs      0m17.3s/1m0s 
+search         [  29% ] 10 VUs     0m17.3s/1m0s 
+
+running (0m20.0s), 26/35 VUs, 5838 complete and 0 interrupted iterations
+availability   [  30% ] 10 VUs     0m18.3s/1m0s 
+hold           [  30% ] 01/10 VUs  0m18.3s/1m0s  5.00 iters/s
+revenue        [  30% ] 5 VUs      0m18.3s/1m0s 
+search         [  30% ] 10 VUs     0m18.3s/1m0s 
+
+running (0m21.0s), 27/35 VUs, 6237 complete and 0 interrupted iterations
+availability   [  32% ] 10 VUs     0m19.3s/1m0s 
+hold           [  32% ] 02/10 VUs  0m19.3s/1m0s  5.00 iters/s
+revenue        [  32% ] 5 VUs      0m19.3s/1m0s 
+search         [  32% ] 10 VUs     0m19.3s/1m0s 
+
+running (0m22.0s), 27/35 VUs, 6551 complete and 0 interrupted iterations
+availability   [  34% ] 10 VUs     0m20.3s/1m0s 
+hold           [  34% ] 02/10 VUs  0m20.3s/1m0s  5.00 iters/s
+revenue        [  34% ] 5 VUs      0m20.3s/1m0s 
+search         [  34% ] 10 VUs     0m20.3s/1m0s 
+
+running (0m23.0s), 26/35 VUs, 6869 complete and 0 interrupted iterations
+availability   [  35% ] 10 VUs     0m21.3s/1m0s 
+hold           [  35% ] 01/10 VUs  0m21.3s/1m0s  5.00 iters/s
+revenue        [  35% ] 5 VUs      0m21.3s/1m0s 
+search         [  35% ] 10 VUs     0m21.3s/1m0s 
+
+running (0m24.0s), 26/35 VUs, 7257 complete and 0 interrupted iterations
+availability   [  37% ] 10 VUs     0m22.3s/1m0s 
+hold           [  37% ] 01/10 VUs  0m22.3s/1m0s  5.00 iters/s
+revenue        [  37% ] 5 VUs      0m22.3s/1m0s 
+search         [  37% ] 10 VUs     0m22.3s/1m0s 
+
+running (0m25.0s), 25/35 VUs, 7511 complete and 0 interrupted iterations
+availability   [  39% ] 10 VUs     0m23.3s/1m0s 
+hold           [  39% ] 00/10 VUs  0m23.3s/1m0s  5.00 iters/s
+revenue        [  39% ] 5 VUs      0m23.3s/1m0s 
+search         [  39% ] 10 VUs     0m23.3s/1m0s 
+
+running (0m26.0s), 26/35 VUs, 7838 complete and 0 interrupted iterations
+availability   [  40% ] 10 VUs     0m24.3s/1m0s 
+hold           [  40% ] 01/10 VUs  0m24.3s/1m0s  5.00 iters/s
+revenue        [  40% ] 5 VUs      0m24.3s/1m0s 
+search         [  40% ] 10 VUs     0m24.3s/1m0s 
+
+running (0m27.0s), 26/35 VUs, 8244 complete and 0 interrupted iterations
+availability   [  42% ] 10 VUs     0m25.3s/1m0s 
+hold           [  42% ] 01/10 VUs  0m25.3s/1m0s  5.00 iters/s
+revenue        [  42% ] 5 VUs      0m25.3s/1m0s 
+search         [  42% ] 10 VUs     0m25.3s/1m0s 
+
+running (0m28.0s), 25/35 VUs, 8599 complete and 0 interrupted iterations
+availability   [  44% ] 10 VUs     0m26.3s/1m0s 
+hold           [  44% ] 00/10 VUs  0m26.3s/1m0s  5.00 iters/s
+revenue        [  44% ] 5 VUs      0m26.3s/1m0s 
+search         [  44% ] 10 VUs     0m26.3s/1m0s 
+
+running (0m29.0s), 26/35 VUs, 8938 complete and 0 interrupted iterations
+availability   [  45% ] 10 VUs     0m27.3s/1m0s 
+hold           [  45% ] 01/10 VUs  0m27.3s/1m0s  5.00 iters/s
+revenue        [  45% ] 5 VUs      0m27.3s/1m0s 
+search         [  45% ] 10 VUs     0m27.3s/1m0s 
+
+running (0m30.0s), 27/35 VUs, 9296 complete and 0 interrupted iterations
+availability   [  47% ] 10 VUs     0m28.3s/1m0s 
+hold           [  47% ] 02/10 VUs  0m28.3s/1m0s  5.00 iters/s
+revenue        [  47% ] 5 VUs      0m28.3s/1m0s 
+search         [  47% ] 10 VUs     0m28.3s/1m0s 
+
+running (0m31.0s), 26/35 VUs, 9684 complete and 0 interrupted iterations
+availability   [  49% ] 10 VUs     0m29.3s/1m0s 
+hold           [  49% ] 01/10 VUs  0m29.3s/1m0s  5.00 iters/s
+revenue        [  49% ] 5 VUs      0m29.3s/1m0s 
+search         [  49% ] 10 VUs     0m29.3s/1m0s 
+
+running (0m32.0s), 26/35 VUs, 10097 complete and 0 interrupted iterations
+availability   [  50% ] 10 VUs     0m30.3s/1m0s 
+hold           [  50% ] 01/10 VUs  0m30.3s/1m0s  5.00 iters/s
+revenue        [  50% ] 5 VUs      0m30.3s/1m0s 
+search         [  50% ] 10 VUs     0m30.3s/1m0s 
+
+running (0m33.0s), 26/35 VUs, 10505 complete and 0 interrupted iterations
+availability   [  52% ] 10 VUs     0m31.3s/1m0s 
+hold           [  52% ] 01/10 VUs  0m31.3s/1m0s  5.00 iters/s
+revenue        [  52% ] 5 VUs      0m31.3s/1m0s 
+search         [  52% ] 10 VUs     0m31.3s/1m0s 
+
+running (0m34.0s), 25/35 VUs, 10904 complete and 0 interrupted iterations
+availability   [  54% ] 10 VUs     0m32.3s/1m0s 
+hold           [  54% ] 00/10 VUs  0m32.3s/1m0s  5.00 iters/s
+revenue        [  54% ] 5 VUs      0m32.3s/1m0s 
+search         [  54% ] 10 VUs     0m32.3s/1m0s 
+
+running (0m35.0s), 26/35 VUs, 11145 complete and 0 interrupted iterations
+availability   [  55% ] 10 VUs     0m33.3s/1m0s 
+hold           [  55% ] 01/10 VUs  0m33.3s/1m0s  5.00 iters/s
+revenue        [  55% ] 5 VUs      0m33.3s/1m0s 
+search         [  55% ] 10 VUs     0m33.3s/1m0s 
+
+running (0m36.0s), 25/35 VUs, 11414 complete and 0 interrupted iterations
+availability   [  57% ] 10 VUs     0m34.3s/1m0s 
+hold           [  57% ] 00/10 VUs  0m34.3s/1m0s  5.00 iters/s
+revenue        [  57% ] 5 VUs      0m34.3s/1m0s 
+search         [  57% ] 10 VUs     0m34.3s/1m0s 
+
+running (0m37.0s), 27/35 VUs, 11747 complete and 0 interrupted iterations
+availability   [  59% ] 10 VUs     0m35.3s/1m0s 
+hold           [  59% ] 02/10 VUs  0m35.3s/1m0s  5.00 iters/s
+revenue        [  59% ] 5 VUs      0m35.3s/1m0s 
+search         [  59% ] 10 VUs     0m35.3s/1m0s 
+
+running (0m38.0s), 27/35 VUs, 12026 complete and 0 interrupted iterations
+availability   [  60% ] 10 VUs     0m36.3s/1m0s 
+hold           [  60% ] 02/10 VUs  0m36.3s/1m0s  5.00 iters/s
+revenue        [  60% ] 5 VUs      0m36.3s/1m0s 
+search         [  60% ] 10 VUs     0m36.3s/1m0s 
+
+running (0m39.0s), 26/35 VUs, 12350 complete and 0 interrupted iterations
+availability   [  62% ] 10 VUs     0m37.3s/1m0s 
+hold           [  62% ] 01/10 VUs  0m37.3s/1m0s  5.00 iters/s
+revenue        [  62% ] 5 VUs      0m37.3s/1m0s 
+search         [  62% ] 10 VUs     0m37.3s/1m0s 
+
+running (0m40.0s), 26/35 VUs, 12707 complete and 0 interrupted iterations
+availability   [  64% ] 10 VUs     0m38.3s/1m0s 
+hold           [  64% ] 01/10 VUs  0m38.3s/1m0s  5.00 iters/s
+revenue        [  64% ] 5 VUs      0m38.3s/1m0s 
+search         [  64% ] 10 VUs     0m38.3s/1m0s 
+
+running (0m41.0s), 26/35 VUs, 13026 complete and 0 interrupted iterations
+availability   [  65% ] 10 VUs     0m39.3s/1m0s 
+hold           [  65% ] 01/10 VUs  0m39.3s/1m0s  5.00 iters/s
+revenue        [  65% ] 5 VUs      0m39.3s/1m0s 
+search         [  65% ] 10 VUs     0m39.3s/1m0s 
+
+running (0m42.0s), 26/35 VUs, 13451 complete and 0 interrupted iterations
+availability   [  67% ] 10 VUs     0m40.3s/1m0s 
+hold           [  67% ] 01/10 VUs  0m40.3s/1m0s  5.00 iters/s
+revenue        [  67% ] 5 VUs      0m40.3s/1m0s 
+search         [  67% ] 10 VUs     0m40.3s/1m0s 
+
+running (0m43.0s), 27/35 VUs, 13855 complete and 0 interrupted iterations
+availability   [  69% ] 10 VUs     0m41.3s/1m0s 
+hold           [  69% ] 02/10 VUs  0m41.3s/1m0s  5.00 iters/s
+revenue        [  69% ] 5 VUs      0m41.3s/1m0s 
+search         [  69% ] 10 VUs     0m41.3s/1m0s 
+
+running (0m44.0s), 26/35 VUs, 14258 complete and 0 interrupted iterations
+availability   [  70% ] 10 VUs     0m42.3s/1m0s 
+hold           [  70% ] 01/10 VUs  0m42.3s/1m0s  5.00 iters/s
+revenue        [  70% ] 5 VUs      0m42.3s/1m0s 
+search         [  70% ] 10 VUs     0m42.3s/1m0s 
+
+running (0m45.0s), 26/35 VUs, 14536 complete and 0 interrupted iterations
+availability   [  72% ] 10 VUs     0m43.3s/1m0s 
+hold           [  72% ] 01/10 VUs  0m43.3s/1m0s  5.00 iters/s
+revenue        [  72% ] 5 VUs      0m43.3s/1m0s 
+search         [  72% ] 10 VUs     0m43.3s/1m0s 
+
+running (0m46.0s), 26/35 VUs, 14873 complete and 0 interrupted iterations
+availability   [  74% ] 10 VUs     0m44.3s/1m0s 
+hold           [  74% ] 01/10 VUs  0m44.3s/1m0s  5.00 iters/s
+revenue        [  74% ] 5 VUs      0m44.3s/1m0s 
+search         [  74% ] 10 VUs     0m44.3s/1m0s 
+
+running (0m47.0s), 26/35 VUs, 15288 complete and 0 interrupted iterations
+availability   [  75% ] 10 VUs     0m45.3s/1m0s 
+hold           [  75% ] 01/10 VUs  0m45.3s/1m0s  5.00 iters/s
+revenue        [  75% ] 5 VUs      0m45.3s/1m0s 
+search         [  75% ] 10 VUs     0m45.3s/1m0s 
+
+running (0m48.0s), 26/35 VUs, 15638 complete and 0 interrupted iterations
+availability   [  77% ] 10 VUs     0m46.3s/1m0s 
+hold           [  77% ] 01/10 VUs  0m46.3s/1m0s  5.00 iters/s
+revenue        [  77% ] 5 VUs      0m46.3s/1m0s 
+search         [  77% ] 10 VUs     0m46.3s/1m0s 
+
+running (0m49.0s), 26/35 VUs, 15985 complete and 0 interrupted iterations
+availability   [  79% ] 10 VUs     0m47.3s/1m0s 
+hold           [  79% ] 01/10 VUs  0m47.3s/1m0s  5.00 iters/s
+revenue        [  79% ] 5 VUs      0m47.3s/1m0s 
+search         [  79% ] 10 VUs     0m47.3s/1m0s 
+
+running (0m50.0s), 25/35 VUs, 16347 complete and 0 interrupted iterations
+availability   [  80% ] 10 VUs     0m48.3s/1m0s 
+hold           [  80% ] 00/10 VUs  0m48.3s/1m0s  5.00 iters/s
+revenue        [  80% ] 5 VUs      0m48.3s/1m0s 
+search         [  80% ] 10 VUs     0m48.3s/1m0s 
+
+running (0m51.0s), 25/35 VUs, 16719 complete and 0 interrupted iterations
+availability   [  82% ] 10 VUs     0m49.3s/1m0s 
+hold           [  82% ] 00/10 VUs  0m49.3s/1m0s  5.00 iters/s
+revenue        [  82% ] 5 VUs      0m49.3s/1m0s 
+search         [  82% ] 10 VUs     0m49.3s/1m0s 
+
+running (0m52.0s), 26/35 VUs, 17133 complete and 0 interrupted iterations
+availability   [  84% ] 10 VUs     0m50.3s/1m0s 
+hold           [  84% ] 01/10 VUs  0m50.3s/1m0s  5.00 iters/s
+revenue        [  84% ] 5 VUs      0m50.3s/1m0s 
+search         [  84% ] 10 VUs     0m50.3s/1m0s 
+
+running (0m53.0s), 26/35 VUs, 17540 complete and 0 interrupted iterations
+availability   [  85% ] 10 VUs     0m51.3s/1m0s 
+hold           [  85% ] 01/10 VUs  0m51.3s/1m0s  5.00 iters/s
+revenue        [  85% ] 5 VUs      0m51.3s/1m0s 
+search         [  85% ] 10 VUs     0m51.3s/1m0s 
+
+running (0m54.0s), 26/35 VUs, 17929 complete and 0 interrupted iterations
+availability   [  87% ] 10 VUs     0m52.3s/1m0s 
+hold           [  87% ] 01/10 VUs  0m52.3s/1m0s  5.00 iters/s
+revenue        [  87% ] 5 VUs      0m52.3s/1m0s 
+search         [  87% ] 10 VUs     0m52.3s/1m0s 
+
+running (0m55.0s), 25/35 VUs, 18213 complete and 0 interrupted iterations
+availability   [  89% ] 10 VUs     0m53.3s/1m0s 
+hold           [  89% ] 00/10 VUs  0m53.3s/1m0s  5.00 iters/s
+revenue        [  89% ] 5 VUs      0m53.3s/1m0s 
+search         [  89% ] 10 VUs     0m53.3s/1m0s 
+
+running (0m56.0s), 27/35 VUs, 18443 complete and 0 interrupted iterations
+availability   [  90% ] 10 VUs     0m54.3s/1m0s 
+hold           [  90% ] 02/10 VUs  0m54.3s/1m0s  5.00 iters/s
+revenue        [  90% ] 5 VUs      0m54.3s/1m0s 
+search         [  90% ] 10 VUs     0m54.3s/1m0s 
+
+running (0m57.0s), 25/35 VUs, 18746 complete and 0 interrupted iterations
+availability   [  92% ] 10 VUs     0m55.3s/1m0s 
+hold           [  92% ] 00/10 VUs  0m55.3s/1m0s  5.00 iters/s
+revenue        [  92% ] 5 VUs      0m55.3s/1m0s 
+search         [  92% ] 10 VUs     0m55.3s/1m0s 
+
+running (0m58.0s), 27/35 VUs, 19088 complete and 0 interrupted iterations
+availability   [  94% ] 10 VUs     0m56.3s/1m0s 
+hold           [  94% ] 02/10 VUs  0m56.3s/1m0s  5.00 iters/s
+revenue        [  94% ] 5 VUs      0m56.3s/1m0s 
+search         [  94% ] 10 VUs     0m56.3s/1m0s 
+
+running (0m59.0s), 25/35 VUs, 19442 complete and 0 interrupted iterations
+availability   [  95% ] 10 VUs     0m57.3s/1m0s 
+hold           [  95% ] 00/10 VUs  0m57.3s/1m0s  5.00 iters/s
+revenue        [  95% ] 5 VUs      0m57.3s/1m0s 
+search         [  95% ] 10 VUs     0m57.3s/1m0s 
+
+running (1m00.0s), 26/35 VUs, 19788 complete and 0 interrupted iterations
+availability   [  97% ] 10 VUs     0m58.3s/1m0s 
+hold           [  97% ] 01/10 VUs  0m58.3s/1m0s  5.00 iters/s
+revenue        [  97% ] 5 VUs      0m58.3s/1m0s 
+search         [  97% ] 10 VUs     0m58.3s/1m0s 
+
+running (1m01.0s), 26/35 VUs, 20167 complete and 0 interrupted iterations
+availability   [  99% ] 10 VUs     0m59.3s/1m0s 
+hold           [  99% ] 01/10 VUs  0m59.3s/1m0s  5.00 iters/s
+revenue        [  99% ] 5 VUs      0m59.3s/1m0s 
+search         [  99% ] 10 VUs     0m59.3s/1m0s 
+
+
+  █ THRESHOLDS 
+
+    atrium_availability_ms
+    ✓ 'p(95)<300' p(95)=198.23ms
+
+    atrium_availability_reqs
+    ✓ 'count>0' count=7185
+
+    atrium_errors
+    ✓ 'rate<0.01' rate=0.00%
+
+    atrium_hold_ms
+    ✗ 'p(95)<250' p(95)=536.44ms
+
+    atrium_hold_reqs
+    ✓ 'count>0' count=301
+
+    atrium_revenue_ms
+    ✓ 'p(95)<800' p(95)=219.88ms
+
+    atrium_revenue_reqs
+    ✓ 'count>0' count=3114
+
+    atrium_search_ms
+    ✓ 'p(95)<500' p(95)=147.29ms
+
+    atrium_search_reqs
+    ✓ 'count>0' count=9885
+
+
+  █ TOTAL RESULTS 
+
+    checks_total.......: 20485   331.685293/s
+    checks_succeeded...: 100.00% 20485 out of 20485
+    checks_failed......: 0.00%   0 out of 20485
+
+    ✓ availability 200
+    ✓ search 200
+    ✓ revenue 200
+    ✓ hold 201 or 409
+
+    CUSTOM
+    atrium_availability_ms.........: min=7.71ms  med=60.63ms avg=82.56ms  p(90)=168.29ms p(95)=198.23ms p(99)=298.81ms max=1.12s
+    atrium_availability_reqs.......: 7185   116.336775/s
+    atrium_errors..................: 0.00%  0 out of 20485
+    atrium_hold_201................: 301    4.873677/s
+    atrium_hold_ms.................: min=26.05ms med=161.5ms avg=219.77ms p(90)=459.33ms p(95)=536.44ms p(99)=676.88ms max=1.32s
+    atrium_hold_reqs...............: 301    4.873677/s
+    atrium_revenue_ms..............: min=12.77ms med=72.09ms avg=95.46ms  p(90)=181.23ms p(95)=219.88ms p(99)=342.54ms max=1s   
+    atrium_revenue_reqs............: 3114   50.420698/s
+    atrium_search_ms...............: min=4.87ms  med=44.4ms  avg=59.92ms  p(90)=122.16ms p(95)=147.29ms p(99)=223.28ms max=1.1s 
+    atrium_search_reqs.............: 9885   160.054143/s
+
+    HTTP
+    http_req_duration..............: min=4.87ms  med=54.93ms avg=75.45ms  p(90)=154.62ms p(95)=189.62ms p(99)=306.33ms max=1.32s
+      { expected_response:true }...: min=4.87ms  med=54.93ms avg=75.45ms  p(90)=154.62ms p(95)=189.62ms p(99)=306.33ms max=1.32s
+    http_req_failed................: 0.00%  0 out of 20549
+    http_reqs......................: 20549  332.721556/s
+
+    EXECUTION
+    iteration_duration.............: min=5.26ms  med=55.79ms avg=76.2ms   p(90)=155.34ms p(95)=190.43ms p(99)=308.01ms max=1.32s
+    iterations.....................: 20485  331.685293/s
+    vus............................: 26     min=0          max=29
+    vus_max........................: 35     min=35         max=35
+
+    NETWORK
+    data_received..................: 86 MB  1.4 MB/s
+    data_sent......................: 9.5 MB 154 kB/s
+
+
+
+
+running (1m01.8s), 00/35 VUs, 20485 complete and 0 interrupted iterations
+availability ✓ [ 100% ] 10 VUs     1m0s 
+hold         ✓ [ 100% ] 00/10 VUs  1m0s  5.00 iters/s
+revenue      ✓ [ 100% ] 5 VUs      1m0s 
+search       ✓ [ 100% ] 10 VUs     1m0s 
+time="2026-08-23T22:04:44Z" level=error msg="thresholds on metrics 'atrium_hold_ms' have been crossed"

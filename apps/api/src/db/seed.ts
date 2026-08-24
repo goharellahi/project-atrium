@@ -181,6 +181,9 @@ interface SeedSummary {
   payments: number;
   bookings: number;
   lineItems: number;
+  /** What the generator meant to write, so a divergence from the count shows. */
+  intendedBookings: number;
+  intendedLineItems: number;
   emptyWindow: { room_id: string; room_name: string; starts_at: string; ends_at: string } | null;
   logins: { role: string; email: string; password: string; venue: string | null }[];
   elapsedSeconds: number;
@@ -267,19 +270,72 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
 
   await client.query('ANALYZE');
 
+  /**
+   * The summary is counted FROM THE DATABASE, not from what this process thinks
+   * it inserted.
+   *
+   * P5 caught the demo profile advertising 25,000 bookings and delivering
+   * 14,138, and the only reason that was catchable is that somebody went and
+   * counted. A summary assembled from in-memory tallies can only ever report
+   * the generator's intent — it agrees with itself by construction, including
+   * when a batch was rejected or an apportionment lost rows. Counting the
+   * tables closes that loop. It also caught this file over-reporting its own
+   * user count by three, which nobody had noticed because nothing checked.
+   *
+   * `written` is still returned alongside so a divergence is visible rather
+   * than smoothed over: if the generator meant to write 250,000 and the table
+   * holds fewer, the seed says both numbers.
+   */
+  const counted = await countRows(client);
+
   return {
     profile: profile.name,
-    venues: venues.length,
-    rooms: rooms.length,
-    equipmentTypes: equipment.length,
-    users: users.customers.length + users.staff.length + 1,
+    venues: counted.venues,
+    rooms: counted.rooms,
+    equipmentTypes: counted.equipment_types,
+    users: counted.users,
     policies,
-    payments,
-    bookings,
-    lineItems,
+    payments: counted.payments,
+    bookings: counted.bookings,
+    lineItems: counted.booking_line_items,
+    intendedBookings: bookings,
+    intendedLineItems: lineItems,
     emptyWindow,
     logins: users.logins,
     elapsedSeconds: Math.round((Date.now() - startedAt) / 100) / 10,
+  };
+}
+
+interface RowCounts {
+  venues: number;
+  rooms: number;
+  equipment_types: number;
+  users: number;
+  bookings: number;
+  booking_line_items: number;
+  payments: number;
+}
+
+/** Row counts straight from the tables the seed just wrote. */
+async function countRows(client: PoolClient): Promise<RowCounts> {
+  const { rows } = await client.query<Record<keyof RowCounts, string>>(`
+    SELECT (SELECT count(*) FROM venues)             AS venues,
+           (SELECT count(*) FROM rooms)              AS rooms,
+           (SELECT count(*) FROM equipment_types)    AS equipment_types,
+           (SELECT count(*) FROM users)              AS users,
+           (SELECT count(*) FROM bookings)           AS bookings,
+           (SELECT count(*) FROM booking_line_items) AS booking_line_items,
+           (SELECT count(*) FROM payments)           AS payments
+  `);
+  const row = rows[0]!;
+  return {
+    venues: Number(row.venues),
+    rooms: Number(row.rooms),
+    equipment_types: Number(row.equipment_types),
+    users: Number(row.users),
+    bookings: Number(row.bookings),
+    booking_line_items: Number(row.booking_line_items),
+    payments: Number(row.payments),
   };
 }
 
@@ -742,6 +798,8 @@ async function seedBookings(
   const now = new Date();
   const rangeStart = addMonths(now, -profile.monthsBack);
 
+  const rangeEnd = addMonths(now, profile.monthsForward);
+
   /**
    * Density varies per room rather than times varying randomly. A busy room
    * books most of its available slots; a quiet one skips most. That is what
@@ -755,34 +813,67 @@ async function seedBookings(
    * means a room's target is always below what its own density can produce.
    */
   const densities = bookableRooms.map(() => 0.3 + rng() * 0.6);
-  const densitySum = densities.reduce((a, b) => a + b, 0);
+
+  /**
+   * How many non-overlapping slots each room's calendar can hold, counted by
+   * walking it — not estimated.
+   *
+   * ## Why this pass exists (P6)
+   *
+   * Up to P6 the walk simply ran forward from the start of the range and
+   * stopped the moment it had produced its target. Since the cursor only moves
+   * forward, that packs every room's whole allocation into the OLDEST part of
+   * the calendar and leaves the newest part almost empty. The full profile
+   * looked correct by every count that was being checked — 250,000 rows, 24
+   * months of span — while actually delivering 21,000 bookings a month for the
+   * first year and 52 in the last month.
+   *
+   * That is fatal to a benchmark rather than untidy. Room availability, cross
+   * venue search and create-hold all query the FUTURE, and the future was the
+   * empty end. Every p95 in LOAD_TEST.md would have been measured against a
+   * region of the table with almost nothing in it, and the numbers would have
+   * been fast, reproducible and meaningless.
+   *
+   * ## Why counting is exact rather than estimated
+   *
+   * Slot geometry — how long each candidate booking is, and therefore where the
+   * cursor lands next — is drawn from a per-room generator that depends only on
+   * the room index. Emission does not affect it: a slot that is skipped advances
+   * the cursor by `duration + turnaround`, and a slot that is emitted advances
+   * it by `ends_at + turnaround`, which is the same instant. So the counting
+   * pass and the emitting pass see an identical sequence of candidate slots, and
+   * the count is the real capacity of that room's calendar, not a formula about
+   * average opening hours that a venue closing on Tuesdays would falsify.
+   */
+  const capacities = bookableRooms.map((room, roomIndex) =>
+    countRoomSlots(
+      venuesById.get(room.venue.id)!,
+      rangeStart,
+      rangeEnd,
+      geometryRng(roomIndex),
+    ),
+  );
+
+  const targets = apportion(profile.bookings, densities, capacities);
 
   let written = 0;
   let lineItemsWritten = 0;
   let pending: BookingDraft[] = [];
 
   for (const [roomIndex, room] of bookableRooms.entries()) {
-    if (written >= profile.bookings) break;
-
     const venue = venuesById.get(room.venue.id)!;
-    const density = densities[roomIndex]!;
-    // 15% headroom on each room's apportioned share, with the global remaining
-    // count as the real cap. Without slack, a room whose venue closes one extra
-    // day a week falls a few bookings short of its share and nothing makes it
-    // up — the seed lands just under its advertised volume every time. The
-    // headroom lets rooms with spare calendar absorb that slack; the global cap
-    // keeps the total exact rather than overshooting.
-    const share = Math.ceil((profile.bookings * density * 1.15) / densitySum);
-    const target = Math.min(share, profile.bookings - written);
+    const target = targets[roomIndex]!;
+    if (target === 0) continue;
 
     const drafts = walkRoomCalendar(
       room,
       venue,
       rangeStart,
+      rangeEnd,
       now,
-      profile,
       target,
-      density,
+      capacities[roomIndex]!,
+      geometryRng(roomIndex),
       rng,
       users,
       equipmentByVenue.get(venue.id) ?? [],
@@ -808,68 +899,121 @@ async function seedBookings(
   return { bookings: written, lineItems: lineItemsWritten, emptyWindow };
 }
 
-interface BookingDraft {
-  venueId: string;
-  roomId: string;
-  userId: string;
-  startsAt: Date;
-  endsAt: Date;
-  status: string;
-  totalMinor: number;
-  currency: string;
-  lineItem: { equipmentTypeId: string; quantity: number; rateMinor: number } | null;
+/**
+ * The slot-geometry generator for one room.
+ *
+ * Seeded from the room's index alone, so the counting pass and the emitting
+ * pass can each construct it and get the identical stream. Kept separate from
+ * the shared content generator (statuses, customers, equipment) precisely so
+ * that consuming a content draw on one pass and not the other cannot shift the
+ * geometry out from under the count.
+ */
+function geometryRng(roomIndex: number): () => number {
+  return makeRng((Math.imul(roomIndex + 1, 2_654_435_761) ^ 0x5e_ed_10_7e) >>> 0);
 }
 
 /**
- * Walk one room's calendar forward, emitting non-overlapping slots.
+ * Split `total` across rooms in proportion to density, without ever giving a
+ * room more slots than its calendar physically holds.
  *
- * The cursor only ever moves forward, and it always jumps past the turnaround
- * after emitting. Two bookings for this room therefore cannot overlap, and the
- * exclusion constraint is never asked to reject anything. That is the whole
- * trick: the constraint stays armed during the seed and costs nothing, instead
- * of being dropped and recreated (which would leave the seeded data unverified
- * by the very rule it is supposed to respect).
+ * The naive proportional split overshoots on cramped rooms — a venue open six
+ * hours a day cannot absorb the share a density of 0.9 implies — and whatever
+ * it cannot take is simply lost, which is the shape of the shortfall P5 caught
+ * at 14,138 of 25,000. Here the overflow is redistributed: rooms are capped at
+ * capacity, the leftover is re-apportioned across whoever still has headroom,
+ * and the loop repeats until either the total is placed or no room has room.
+ *
+ * The remainder from integer rounding is handed to the roomiest rooms last, so
+ * the sum is EXACTLY `total` rather than approximately it. That exactness is
+ * the point: "did the seed deliver what it advertised" has to be a yes/no
+ * question, not a question about tolerance.
  */
-function walkRoomCalendar(
-  room: SeededRoom,
+function apportion(
+  total: number,
+  weights: readonly number[],
+  capacities: readonly number[],
+): number[] {
+  const allocated = new Array<number>(weights.length).fill(0);
+  let remaining = Math.min(total, capacities.reduce((a, b) => a + b, 0));
+
+  // At most a handful of rounds in practice; the bound is a guard, not a plan.
+  for (let round = 0; round < 32 && remaining > 0; round += 1) {
+    const openIdx = allocated
+      .map((a, i) => (a < capacities[i]! ? i : -1))
+      .filter((i) => i >= 0);
+    if (openIdx.length === 0) break;
+
+    const weightSum = openIdx.reduce((sum, i) => sum + weights[i]!, 0);
+    if (weightSum <= 0) break;
+
+    const before = remaining;
+    for (const i of openIdx) {
+      if (remaining <= 0) break;
+      const want = Math.max(1, Math.floor((before * weights[i]!) / weightSum));
+      const give = Math.min(want, capacities[i]! - allocated[i]!, remaining);
+      allocated[i] = allocated[i]! + give;
+      remaining -= give;
+    }
+    // No forward progress with headroom still available means the weights are
+    // degenerate; fall through to the sweep below rather than spinning.
+    if (remaining === before) break;
+  }
+
+  // Whatever integer rounding left over goes to the rooms with the most spare
+  // calendar, one at a time.
+  if (remaining > 0) {
+    const bySpare = allocated
+      .map((a, i) => ({ i, spare: capacities[i]! - a }))
+      .filter((r) => r.spare > 0)
+      .sort((a, b) => b.spare - a.spare);
+    for (const { i, spare } of bySpare) {
+      if (remaining <= 0) break;
+      const give = Math.min(spare, remaining);
+      allocated[i] = allocated[i]! + give;
+      remaining -= give;
+    }
+  }
+
+  return allocated;
+}
+
+/**
+ * Walk one room's calendar and count the candidate slots, emitting nothing.
+ *
+ * Draws only from the geometry generator, in the same order the emitting walk
+ * does, so the two agree slot for slot.
+ */
+function countRoomSlots(
   venue: SeededVenue,
   rangeStart: Date,
-  now: Date,
-  profile: Profile,
-  target: number,
-  density: number,
-  rng: () => number,
-  users: SeededUsers,
-  venueEquipment: SeededEquipment[],
-): BookingDraft[] {
-  const drafts: BookingDraft[] = [];
-  const rangeEnd = addMonths(now, profile.monthsForward);
+  rangeEnd: Date,
+  geometry: () => number,
+): number {
+  let count = 0;
+  for (const _ of candidateSlots(venue, rangeStart, rangeEnd, geometry)) count += 1;
+  return count;
+}
 
-  /**
-   * Equipment assignment is deterministic, not random, and that is a
-   * correctness decision rather than a stylistic one.
-   *
-   * Rooms in one venue DO overlap in time, so randomly attaching equipment
-   * would let peak concurrent usage of a type exceed `units_owned` — the seed
-   * would then be publishing data that violates INV-2, and the reconciliation
-   * and availability endpoints would report a platform that had already
-   * oversold before a single request arrived.
-   *
-   * Mapping each room to ONE equipment type by its position in the venue bounds
-   * peak usage for a type at `ceil(rooms_in_venue / equipment_types)` — around
-   * 2 for the demo profile and 4 for full, against a minimum of 3 units owned
-   * for demo and ~10 for full. Safe by construction, and re-derivable from the
-   * numbers rather than hoped for.
-   */
-  const assignedEquipment =
-    venueEquipment.length > 0
-      ? venueEquipment[room.indexInVenue % venueEquipment.length]!
-      : null;
-
+/**
+ * The candidate slots for one room's calendar, in order.
+ *
+ * The cursor only ever moves forward and always clears the turnaround, so no
+ * two slots this yields can overlap. That is the whole trick: `no_room_overlap`
+ * stays armed for the entire seed and is never asked to reject anything, rather
+ * than being dropped and recreated — which would leave the seeded calendar
+ * unverified by the one rule it is supposed to respect.
+ */
+function* candidateSlots(
+  venue: SeededVenue,
+  rangeStart: Date,
+  rangeEnd: Date,
+  geometry: () => number,
+): Generator<{ startsAt: Date; endsAt: Date }> {
   let cursor = new Date(rangeStart);
   let guard = 0;
+  const GUARD_LIMIT = 4_000_000;
 
-  while (drafts.length < target && cursor < rangeEnd && guard < target * 40) {
+  while (cursor < rangeEnd && guard < GUARD_LIMIT) {
     guard += 1;
 
     const local = toLocalParts(cursor, venue.timezone);
@@ -902,7 +1046,7 @@ function walkRoomCalendar(
     }
 
     // 1 to 4 hours, on the grid.
-    const durationMinutes = intBetween(rng, 2, 8) * 30;
+    const durationMinutes = intBetween(geometry, 2, 8) * 30;
     const endsAt = new Date(cursor.getTime() + durationMinutes * 60_000);
 
     if (endsAt > dayClose) {
@@ -910,17 +1054,112 @@ function walkRoomCalendar(
       continue;
     }
 
-    // Density: skip this slot rather than shortening it, so the emitted
-    // bookings stay on the grid and the gaps look like real gaps.
-    if (rng() > density) {
-      cursor = new Date(cursor.getTime() + (durationMinutes + 15) * 60_000);
-      continue;
-    }
+    yield { startsAt: new Date(cursor), endsAt };
 
-    const isPast = endsAt < now;
+    // Past the booking AND past the turnaround — the same advance whether the
+    // caller took this slot or skipped it, which is what makes the counting
+    // pass and the emitting pass see one identical sequence.
+    cursor = new Date(endsAt.getTime() + 15 * 60_000);
+  }
+
+  return;
+}
+
+interface BookingDraft {
+  venueId: string;
+  roomId: string;
+  userId: string;
+  startsAt: Date;
+  endsAt: Date;
+  status: string;
+  totalMinor: number;
+  currency: string;
+  lineItem: { equipmentTypeId: string; quantity: number; rateMinor: number } | null;
+}
+
+/**
+ * Emit `target` bookings for one room, spread evenly across its whole calendar.
+ *
+ * ## Striding, not coin flipping (P6)
+ *
+ * The slot to take is chosen by an exact stride over the candidate sequence:
+ * candidate `i` is emitted iff `floor((i+1) * p) > floor(i * p)`, where
+ * `p = target / capacity`. Two properties follow, and both were missing before.
+ *
+ * It emits EXACTLY `target` rows, so "the seed delivered 250,000" is a fact
+ * about the generator rather than a hope about a Bernoulli trial averaging out.
+ * And the rows it emits are spread across the entire range instead of packed
+ * against its start, which is what the previous stop-at-target walk did — see
+ * the note on `countRoomSlots`. A benchmark that queries next week has to find
+ * next week populated.
+ *
+ * What it gives up is clumping WITHIN a room: this room's bookings are now
+ * evenly spaced rather than bursty. Unevenness across the platform survives,
+ * because `target` still varies per room with density, so busy rooms and quiet
+ * rooms still look different from each other. Trading intra-room burstiness for
+ * a calendar that is actually populated where the queries look is the right way
+ * round for a benchmark fixture, and it is recorded here rather than silently.
+ */
+function walkRoomCalendar(
+  room: SeededRoom,
+  venue: SeededVenue,
+  rangeStart: Date,
+  rangeEnd: Date,
+  now: Date,
+  target: number,
+  capacity: number,
+  geometry: () => number,
+  rng: () => number,
+  users: SeededUsers,
+  venueEquipment: SeededEquipment[],
+): BookingDraft[] {
+  const drafts: BookingDraft[] = [];
+  if (target <= 0 || capacity <= 0) return drafts;
+
+  /**
+   * Equipment assignment is deterministic, not random, and that is a
+   * correctness decision rather than a stylistic one.
+   *
+   * Rooms in one venue DO overlap in time, so randomly attaching equipment
+   * would let peak concurrent usage of a type exceed `units_owned` — the seed
+   * would then be publishing data that violates INV-2, and the reconciliation
+   * and availability endpoints would report a platform that had already
+   * oversold before a single request arrived.
+   *
+   * Mapping each room to ONE equipment type by its position in the venue bounds
+   * peak usage for a type at `ceil(rooms_in_venue / equipment_types)` — around
+   * 2 for the demo profile and 4 for full, against a minimum of 3 units owned
+   * for demo and ~10 for full. Safe by construction, and re-derivable from the
+   * numbers rather than hoped for.
+   */
+  const assignedEquipment =
+    venueEquipment.length > 0
+      ? venueEquipment[room.indexInVenue % venueEquipment.length]!
+      : null;
+
+  const want = Math.min(target, capacity);
+  let index = 0;
+
+  for (const slot of candidateSlots(venue, rangeStart, rangeEnd, geometry)) {
+    // Integer arithmetic, not `i * (target / capacity)`.
+    //
+    // The float form is off by an ulp on some ratios, so `capacity * p` lands
+    // fractionally below `target` and the room emits one row fewer than it was
+    // allocated. Spread over 800 rooms that cost 46 bookings out of 250,000 —
+    // small, invisible, and precisely the kind of quiet shortfall this seed has
+    // already been caught delivering once. Multiplying first keeps every
+    // comparison exact, so a room emits its target or its capacity, never
+    // "almost".
+    const take =
+      Math.floor(((index + 1) * want) / capacity) > Math.floor((index * want) / capacity);
+    index += 1;
+    if (!take) continue;
+    if (drafts.length >= want) break;
+
+    const isPast = slot.endsAt < now;
     const status = weightedStatus(rng, isPast ? PAST_STATUSES : FUTURE_STATUSES);
 
-    const durationHours = durationMinutes / 60;
+    const durationHours = (slot.endsAt.getTime() - slot.startsAt.getTime()) / 3_600_000;
     const attachEquipment = assignedEquipment !== null && rng() < 0.35;
     const equipmentTotal = attachEquipment ? Math.round(durationHours * 4_000) : 0;
 
@@ -928,8 +1167,8 @@ function walkRoomCalendar(
       venueId: venue.id,
       roomId: room.id,
       userId: pick(rng, users.customers).id,
-      startsAt: new Date(cursor),
-      endsAt,
+      startsAt: slot.startsAt,
+      endsAt: slot.endsAt,
       status,
       totalMinor: Math.round(room.hourlyRateMinor * durationHours) + equipmentTotal,
       currency: venue.city.currency,
@@ -941,10 +1180,6 @@ function walkRoomCalendar(
           }
         : null,
     });
-
-    // Past the booking AND past the turnaround. This is the line that makes
-    // `no_room_overlap` a formality rather than a bottleneck.
-    cursor = new Date(endsAt.getTime() + 15 * 60_000);
   }
 
   return drafts;
@@ -1073,6 +1308,16 @@ function report(s: SeedSummary): void {
       `${s.users} users · ${s.bookings} bookings · ${s.lineItems} line items · ` +
       `${s.payments} payments · ${s.policies} platform policy`,
   );
+  console.log('  (counted from the tables, not tallied in memory)');
+
+  // Said out loud, every time, rather than left for someone to notice. A seed
+  // that under-delivers silently is the exact failure P5 spent a phase finding.
+  if (s.bookings !== s.intendedBookings || s.lineItems !== s.intendedLineItems) {
+    console.log('');
+    console.log('  ⚠ SHORTFALL — the generator and the tables disagree:');
+    console.log(`      bookings   intended ${s.intendedBookings}, table holds ${s.bookings}`);
+    console.log(`      line items intended ${s.intendedLineItems}, table holds ${s.lineItems}`);
+  }
   console.log('');
   console.log('TEST LOGINS  (password is the same for every seeded account)');
   console.log('─'.repeat(78));

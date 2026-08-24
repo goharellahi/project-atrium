@@ -15,7 +15,8 @@ import { runWithContext } from './request-context';
 export class CorrelationMiddleware implements NestMiddleware {
   use(req: Request, res: Response, next: NextFunction): void {
     const header = req.header('x-request-id');
-    const correlationId = header && header.length > 0 ? header : randomUUID();
+    const inherited = Boolean(header && header.length > 0);
+    const correlationId = inherited ? header! : randomUUID();
 
     res.setHeader('x-request-id', correlationId);
 
@@ -30,6 +31,9 @@ export class CorrelationMiddleware implements NestMiddleware {
     // have to be mapped back by hand.
     res.setHeader('x-replica-id', process.env.REPLICA_ID ?? 'unknown');
 
-    runWithContext({ correlationId, principal: null }, () => next());
+    runWithContext(
+      { correlationId, inheritedCorrelationId: inherited, principal: null },
+      () => next(),
+    );
   }
 }

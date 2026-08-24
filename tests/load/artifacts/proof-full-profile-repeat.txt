@@ -1,0 +1,4 @@
+=== 3 consecutive proof runs against the full profile (250,000 bookings) ===
+run 1:       Tests  5 passed (5) |   responses        201 x1, 409 x199 |   admitted         3 (ceiling 3) |   5xx responses    0 |   per replica      api1=135 api2=132 api3=133
+run 2:       Tests  5 passed (5) |   responses        201 x1, 409 x199 |   admitted         3 (ceiling 3) |   5xx responses    0 |   per replica      api1=132 api2=135 api3=133
+run 3:       Tests  5 passed (5) |   responses        201 x1, 409 x199 |   admitted         3 (ceiling 3) |   5xx responses    0 |   per replica      api1=135 api2=132 api3=133

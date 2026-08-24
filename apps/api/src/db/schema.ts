@@ -104,7 +104,19 @@ export const venues = pgTable('venues', {
   createdAt: timestamp('created_at', { withTimezone: true })
     .notNull()
     .defaultNow(),
-}, (t) => [index('venues_city_idx').on(t.city)]);
+}, () => [
+  // No index on `city`.
+  //
+  // There was one until P6, and it recorded zero scans across the whole
+  // benchmark — cross-venue search filters on `lower(city)`, which a btree on
+  // `city` cannot answer. A functional index on `lower(city)` was built and
+  // measured too — and it moved the plan, 253 buffers to 23, while never once
+  // being scanned. What it supplied was not access but an ESTIMATE: Postgres
+  // keeps statistics on indexed expressions, and without one the planner
+  // guessed a single matching venue instead of fourteen. So the right object is
+  // `CREATE STATISTICS ON lower(city)`, which lives in migration 0007 because
+  // Drizzle cannot express it. See ARCHITECTURE.md §5.
+]);
 
 export const rooms = pgTable('rooms', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -242,10 +254,27 @@ export const bookings = pgTable('bookings', {
     .notNull()
     .defaultNow(),
 }, (t) => [
-  index('bookings_venue_idx').on(t.venueId),
+  // (venue_id, starts_at) and not venue_id alone. Every revenue-report query
+  // filters both; the single-column version fetched a venue's entire lifetime
+  // of bookings and discarded 96% of them to the date predicate. The composite
+  // also serves anything the old index served, so the old one is gone.
+  index('bookings_venue_starts_idx').on(t.venueId, t.startsAt),
   index('bookings_user_idx').on(t.userId),
   index('bookings_room_starts_idx').on(t.roomId, t.startsAt),
   index('bookings_status_expires_idx').on(t.status, t.expiresAt),
+  // The hold path's in-transaction expiry, scoped to one room. Without it the
+  // scan is over every stale hold on the platform, inside the hold transaction.
+  index('bookings_room_held_expiry_idx')
+    .on(t.roomId, t.expiresAt)
+    .where(sql`status = 'HELD'`),
+  // A gist on `slot` alone, for cross-venue search. `no_room_overlap` indexes
+  // (room_id, slot); search has a LIST of room ids, so the planner cannot use
+  // room_id as a leading key and walks that index by time across every room.
+  // Declared here so drizzle-kit's snapshot knows it exists — created by
+  // migration 0007, which is also where the measurements are.
+  index('bookings_active_slot_idx')
+    .using('gist', t.slot)
+    .where(sql`status IN ('HELD','PENDING_PAYMENT','CONFIRMED')`),
 ]);
 
 export const bookingLineItems = pgTable('booking_line_items', {
@@ -381,6 +410,23 @@ export const webhookDeliveries = pgTable('webhook_deliveries', {
    * destroys the only evidence that settles a signature dispute.
    */
   rawBody: text('raw_body').notNull(),
+  /**
+   * The inbound X-Request-Id this delivery arrived with.
+   *
+   * The Tier-2 correlation requirement is a chain, not a header: a client's id
+   * reaches the API, the API forwards it to Paygate on the charge, Paygate
+   * stores it against that charge and echoes it on every webhook it sends for
+   * it, and the API adopts it again on the way back in. Every link existed
+   * before this column; none of them was observable anywhere but a log line, so
+   * nothing could assert the chain held. This is the place to look.
+   *
+   * NULL is meaningful and stays possible. Behind nginx every request is named,
+   * so locally this is always set; on Render, where nothing sits in front of the
+   * API, a delivery can arrive with no X-Request-Id at all — and an id minted
+   * here would correlate it with nothing while looking like it correlated it
+   * with something.
+   */
+  correlationId: text('correlation_id'),
   receivedAt: timestamp('received_at', { withTimezone: true })
     .notNull()
     .defaultNow(),

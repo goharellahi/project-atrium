@@ -5,9 +5,9 @@ what was rejected, and what the choice costs. A decision with no cost listed is
 not a decision, it is a preference.
 
 > **Written as decisions are made, not reconstructed at the end.** Entries 1–8
-> are from P4 (payment integrity and tenant isolation); 9–11 are from P5, and
-> every one of those was forced by running the system rather than reasoning
-> about it. The P0–P2 decisions —
+> are from P4 (payment integrity and tenant isolation); 9–11 are from P5 and 12
+> from P6, and every one of those was forced by running the system rather than
+> reasoning about it. The P0–P2 decisions —
 > the exclusion constraint over query-then-insert, the sweep line over
 > `SUM(quantity)`, advisory-lock election over an environment flag, minor units
 > as `bigint` — currently live in `ARCHITECTURE.md` §3 and §7 and are folded in
@@ -268,3 +268,61 @@ write time. Both are fine: the fields worth querying (`charge_id`, `reference`,
 `event`) are extracted into their own columns at ingest, and validating a body
 before its signature is checked would be trusting exactly the bytes under
 suspicion.
+
+---
+
+## 12. Create-hold's missed p95 is accepted and published, not optimised away
+
+**Chosen.** Create-hold measures 536 ms p95 against the brief's 250 ms target.
+The number is published as a miss, with the diagnosis, and no work was done to
+move it in P6. P7 remains the console.
+
+The diagnosis is what makes accepting it defensible rather than lazy. The same
+endpoint answers in **47 ms p95** in isolation, so it is starved, not slow. Two
+candidate causes were tested and both were wrong: it is not the database
+(Postgres used 178% of eight vCPUs while all three Node replicas sat pinned at
+92–98%, which is one core each and Node's ceiling), and it is not the connection
+pool (doubling `PG_POOL_MAX` made throughput *worse*, 342 → 265 req/s). Turning
+read concurrency down located the knee — throughput flat at ~340 req/s from two
+read VUs onward while every latency climbs linearly, the signature of a
+saturated box. Hold meets its target at five read VUs and misses at ten. Full
+working in `LOAD_TEST.md` §5.
+
+**Rejected: moving the availability enumeration off the request path now.** This
+is the cheapest real win available and it is measured, not guessed —
+`enumerate()` walks a 7-day calendar on a 30-minute grid per request, and one
+response is 9.7 KB, which at 7,538 requests is **73 MB of the run's 86 MB**.
+Returning busy intervals and letting the client enumerate would shrink that by
+an order of magnitude and free the CPU that create-hold is queueing behind. It
+touches no invariant: availability is explicitly advisory and the hold path
+never consults it.
+
+It was rejected for P6 anyway, on scope. It is a change to the *console's* data
+contract — the client becomes responsible for enumerating slots — and making
+that change before the console exists means designing an API shape for a
+consumer that has not been written yet. Doing it in P7, with the page that
+consumes it, is the order in which the shape can actually be validated.
+
+**Rejected: re-running the hold scenario alone and reporting 47 ms.** It passes.
+It is also a number about an idle machine, and the brief is explicit that a
+missed target explained is worth more than a hit target unexplained. The
+isolated run stays in `LOAD_TEST.md` as a diagnostic and the mixed run stays the
+headline.
+
+**What it costs.** The repository ships with a published, reproducible failure
+against one of the four stated targets. A reviewer re-running the benchmark on
+similar hardware will see it fail, and the threshold in `atrium.js` is written
+to *fail the run* rather than warn — so this is not a soft miss that can be
+overlooked, it is a red build by design.
+
+The second cost is that the ceiling is asserted rather than proven. The claim
+that more cores fixes it follows from three single-threaded processes each
+saturating one core, and it is consistent with every measurement taken — but I
+have one laptop, so "I would expect" is as far as it goes, and `LOAD_TEST.md`
+says exactly that rather than implying a measurement that was never made.
+
+**What would change this decision.** A run on a machine where the three replicas
+are not CPU-bound. If hold still missed there, the diagnosis is wrong and the
+endpoint itself needs work — most likely folding the advisory lock and the
+stale-hold expiry into one statement to shorten the critical section
+(`LOAD_TEST.md` §5, step 3).

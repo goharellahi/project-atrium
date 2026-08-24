@@ -90,6 +90,7 @@ export const PROBED: readonly string[] = [
   'GET /rooms/:id/availability',
   'GET /search',
   'GET /venues/cancellation-policy',
+  'GET /venues/reports/revenue',
   'PUT /venues/cancellation-policy',
   'GET /admin/reconciliation',
 ];

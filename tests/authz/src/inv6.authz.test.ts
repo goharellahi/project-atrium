@@ -195,6 +195,46 @@ describe('reports', () => {
     const allowed = await call('GET', `/admin/reconciliation?${range}`, world.platformAdmin);
     expect(allowed.status).toBe(200);
   });
+
+  it('GET /venues/reports/revenue reports the token venue, and a venue_id in the query changes nothing', async () => {
+    recordProbe('GET /venues/reports/revenue');
+    // Sixty days forward, not the century-wide window the reconciliation probe
+    // above uses. This report caps its range at 366 days and answers 422 beyond
+    // it, and the window still has to CONTAIN the fixture bookings — they sit
+    // 10 to 12 days out — or `by_room` comes back empty and the no-leak
+    // assertion passes without having had anything to leak.
+    const now = Date.now();
+    const range =
+      `from=${new Date(now - 86_400_000).toISOString()}` +
+      `&to=${new Date(now + 60 * 86_400_000).toISOString()}`;
+
+    const mine = await call('GET', `/venues/reports/revenue?${range}`, world.a.admin);
+    expect(mine.status).toBe(200);
+    expect((mine.json as { venue_id: string }).venue_id).toBe(world.a.venueId);
+    // The report names rooms, so B's room id is exactly the kind of thing that
+    // would leak if the scope came from anywhere but the token — and A's own
+    // room being present is what makes its absence meaningful.
+    expect(mine.text).toContain(world.a.roomId);
+    assertNoLeak(mine, secretsOf(world.b));
+
+    // There is no `venue_id` parameter on this route. Sending one anyway is the
+    // attack, and the only acceptable outcomes are "ignored" or "rejected" —
+    // never "honoured". Asserting the venue is still A's covers both.
+    const tampered = await call(
+      'GET',
+      `/venues/reports/revenue?${range}&venue_id=${world.b.venueId}`,
+      world.a.admin,
+    );
+    expect(tampered.status).toBe(200);
+    expect((tampered.json as { venue_id: string }).venue_id).toBe(world.a.venueId);
+    assertNoLeak(tampered, secretsOf(world.b));
+
+    // The documented mirror of reconciliation: a PLATFORM_ADMIN has no venue in
+    // their token, so this route refuses them rather than inventing one or
+    // silently widening to the whole platform. See ReportsController.
+    const platform = await call('GET', `/venues/reports/revenue?${range}`, world.platformAdmin);
+    expect([403, 404]).toContain(platform.status);
+  });
 });
 
 // ---------------------------------------------------------------------------

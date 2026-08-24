@@ -43,6 +43,20 @@
       "when": 1787495731001,
       "tag": "0005_audit_clock_timestamp",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1787580000001,
+      "tag": "0006_webhook_correlation_id",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1787580000002,
+      "tag": "0007_performance_indexes",
+      "breakpoints": true
     }
   ]
 }

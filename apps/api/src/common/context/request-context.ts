@@ -19,6 +19,17 @@ export interface AuthPrincipal {
 export interface RequestContext {
   /** From X-Request-Id, or generated. Survives into outbound Paygate calls. */
   correlationId: string;
+  /**
+   * True when `correlationId` arrived on the request rather than being minted
+   * here.
+   *
+   * The distinction is the whole point of a correlation id: an id we generated
+   * correlates this request with nothing, while an inherited one ties it to
+   * whatever produced it upstream. Persisting the two indistinguishably would
+   * make a `webhook_deliveries.correlation_id` that is always populated and
+   * therefore says nothing.
+   */
+  inheritedCorrelationId: boolean;
   principal: AuthPrincipal | null;
 }
 
