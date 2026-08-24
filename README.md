@@ -27,12 +27,31 @@ against a deliberately unreliable provider, and honest documentation.
 | | URL |
 | --- | --- |
 | API | https://atrium-api-3p3j.onrender.com |
-| Paygate | *(filled in after the blueprint's first deploy)* |
+| Paygate | https://atrium-paygate.onrender.com |
 | Console | https://project-atrium.vercel.app |
 
 ```bash
 curl -s https://atrium-api-3p3j.onrender.com/health
+curl -s https://atrium-paygate.onrender.com/health
 ```
+
+Paygate's `/health` reports its own configuration, which is the quickest way to
+see what the deployed provider will and will not do:
+
+```json
+{"status":"ok","service":"paygate","chaos":"on","seed":"atrium-render",
+ "callback_url_configured":true,"test_endpoints":"off"}
+```
+
+`test_endpoints: off` is deliberate and permanent — `NODE_ENV=production` is
+baked into Paygate's Dockerfile and it refuses to register `/paygate/_test/*`
+there regardless of the flag, so the deployed instance is the chaotic provider
+the brief describes and deterministic scenarios stay local.
+
+`callback_url_configured: true` says only that a callback URL is set, not that
+it points at this API — the value is not exposed, and the deployed database is
+unseeded, so the round trip has never actually run on the deployed pair. The
+webhook path is proven locally by `pnpm e2e`, against a stack where it does.
 
 Four things a reviewer should know before trying these:
 
