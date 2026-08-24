@@ -273,11 +273,18 @@ integrity work lands separately once the booking core exists.
 ## Deliverables checklist
 
 - [ ] Public git repository with real commit history
-- [~] Deployed API URL — https://atrium-api-3p3j.onrender.com — live. Paygate
-      now deploys alongside it (`render.yaml`), so the payment path works on the
-      deployed instance and not only locally. The database is still unseeded.
+- [~] Deployed API URL — https://atrium-api-3p3j.onrender.com — live, `/health`
+      green with Postgres up and the platform cancellation policy present. The
+      database is still unseeded.
+- [~] Deployed Paygate URL — https://atrium-paygate.onrender.com — live, chaos
+      on, seed `atrium-render`, test endpoints off (permanently, by Dockerfile).
+      **`callback_url_configured: false`**: `PAYGATE_CALLBACK_URL` is
+      `sync: false` in `render.yaml` and was never pasted from the dashboard, so
+      the deployed webhook channel delivers nothing and every payment resolves
+      through the poll fallback instead. One dashboard paste — see the README's
+      Known Issues.
 - [~] Deployed frontend URL — https://project-atrium.vercel.app — live; the
-      console itself is P6
+      console itself is P7
 - [x] `README.md` (stub with Known Issues; final pass in P8)
 - [~] `ARCHITECTURE.md` — §3, §4, §5 and §8 complete with verification
       transcripts and measured plans; §1, §2, §6, §9 still stubs for P8
