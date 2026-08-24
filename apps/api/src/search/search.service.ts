@@ -55,7 +55,22 @@ export class SearchService {
       // `@>` is containment: the room must have EVERY requested amenity, not
       // any of them. "A room with wifi and a piano" is one room, not the union
       // of two sets — `&&` would return rooms with only one of the two.
-      predicates.push(sql`${rooms.amenities} @> ${query.amenity}::text[]`);
+      //
+      // `sql.param` is load bearing. Drizzle expands a bare JS array in a `sql`
+      // template into one placeholder per element, so `${query.amenity}` became
+      // `($1)` bound to the string `wifi` and Postgres answered
+      // `22P02 malformed array literal: "wifi"` — a 500 on every request that
+      // named an amenity, for every input, since the endpoint was written.
+      // Wrapping it binds the array as a single parameter and lets the driver
+      // encode it.
+      //
+      // The same trap is documented on `uuidArray` in
+      // `bookings/equipment-availability.ts`, which exists because the hold path
+      // hit it first. That helper builds a literal and re-validates each id;
+      // amenities are free text from a query string, so binding the array as a
+      // parameter is the safer half of the same lesson — there is no literal to
+      // escape.
+      predicates.push(sql`${rooms.amenities} @> ${sql.param(query.amenity)}::text[]`);
       applied.push('amenity');
     }
 
