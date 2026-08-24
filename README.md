@@ -210,12 +210,14 @@ Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 - **Frontend.** `apps/web` is a placeholder page. P7.
 - **Venue administration.** Nothing writes `venues.overbooking_buffer_pct`, so
   the room-side 422 for a non-zero buffer has no way to be triggered yet. P7.
-- **Create-hold's p95.** Missed at 536 ms against a 250 ms target. The endpoint
-  answers in 47 ms p95 in isolation, so it is starved rather than slow: three
-  Node replicas are pinned at one core each on a four-core laptop. Not a defect
-  to fix in code so much as a ceiling to report honestly —
-  [LOAD_TEST.md](LOAD_TEST.md) §5 has the two hypotheses that were wrong and the
-  four things I would do next.
+- **Create-hold's p95 is missed, and the miss is deliberate.** 536 ms against a
+  250 ms target. The endpoint answers in 47 ms p95 in isolation, so it is starved
+  rather than slow: three Node replicas pinned at one core each on a four-core
+  laptop, with the load generator on the same box. Two candidate causes were
+  tested and both were wrong — not the database, not the connection pool.
+  Published as a failing threshold rather than re-run in isolation until it
+  passes. [LOAD_TEST.md](LOAD_TEST.md) §5 has the elimination;
+  [DECISIONS.md](DECISIONS.md) 12 has why it was accepted rather than fixed.
 
 ### Tests that do not exist yet, and should
 

@@ -271,10 +271,13 @@ losing 46 rows to floating point, and two tests in P5's own suite that passed fo
 the wrong reasons. Read the P6 entry in `PLAN.md` before trusting a number that
 has not been re-run.
 
+Create-hold's missed p95 is **accepted and published, not outstanding work** —
+the reasoning is DECISIONS.md 12. Do not re-open it by tuning; the one thing that
+would change it is a run on a box where the replicas are not CPU-bound.
+
 Next: **P7 — the frontend**, per `DESIGN.md`. Still open: CI runs only the
-offline tests; the rooms-reject-non-zero-overbooking-buffer 422 from P2 waits on
-the venue administration screen; and create-hold's p95 needs either more cores or
-the availability enumeration moved off the request path.
+offline tests, and the rooms-reject-non-zero-overbooking-buffer 422 from P2 waits
+on the venue administration screen.
 
 See `PLAN.md` for the full phase list and the progress log.
 

@@ -272,6 +272,24 @@ What I deliberately did **not** do is re-run the hold scenario alone and report
 47 ms as the result. It is in section 5 as a diagnostic, and the mixed run stays
 the headline.
 
+### The decision taken
+
+**The miss is accepted and published rather than optimised away**, and step 2
+above is scheduled for P7 alongside the console rather than done here. The
+reasoning, including what it costs and what would reverse it, is
+`DECISIONS.md` entry 12.
+
+The short version: step 2 is a change to the console's data contract — the
+client becomes responsible for enumerating slots — and choosing that shape
+before the console exists means designing for a consumer nobody has written.
+Step 1 needs hardware I do not have. So the honest deliverable from this phase
+is the measurement and the elimination, not a better number.
+
+One consequence worth stating plainly: the k6 thresholds are written to **fail
+the run** on a missed target rather than warn. Re-running this benchmark on
+comparable hardware produces a red build, on purpose. A target that does not
+fail is not a target, and a benchmark tuned until it goes green is not evidence.
+
 ---
 
 ## 6. Query plans, before and after indexing

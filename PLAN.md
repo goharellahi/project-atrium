@@ -230,11 +230,13 @@ integrity work lands separately once the booking core exists.
       the only one that did not exist *(pulled forward from P7)*
 - [x] `ARCHITECTURE.md` §5 — indexing and query strategy
 - [x] `ARCHITECTURE.md` §8 — what breaks at 100x, grounded in measured plans
-- [ ] Create-hold p95 under its 250 ms target — **missed, 536 ms.** Diagnosed
-      rather than left as a number: the endpoint answers in 47 ms p95 in
-      isolation and the box is CPU-saturated at 340 req/s with three Node
-      replicas pinned at one core each. LOAD_TEST.md §5 has the elimination and
-      the four things I would do next.
+- [x] Create-hold p95 — **target missed at 536 ms against 250 ms, and the miss
+      is accepted deliberately.** Not left as a bare number: the endpoint answers
+      in 47 ms p95 in isolation, and the box is CPU-saturated at ~340 req/s with
+      three Node replicas pinned at one core each. Two candidate causes were
+      tested and both were wrong. Ticked because the deliverable was the
+      measurement and the diagnosis, not the number — LOAD_TEST.md §5 and
+      DECISIONS.md 12.
 
 ---
 
@@ -246,6 +248,11 @@ integrity work lands separately once the booking core exists.
       landed in P6; this is the page that renders it
 - [ ] Venue administration, including the overbooking buffer — which is what
       unblocks the rooms-reject-non-zero-buffer 422 still open from P2
+- [ ] Availability returns busy intervals and the client enumerates slots.
+      Deferred here from P6 on purpose: it is the cheapest measured performance
+      win left (73 MB of the benchmark's 86 MB is availability payload) but it
+      changes the console's data contract, and designing that shape before the
+      console exists means designing for a consumer nobody has written.
 
 ---
 
