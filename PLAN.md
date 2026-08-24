@@ -277,13 +277,16 @@ Six screens, in the priority order the phase was scoped in. All six shipped.
       designing and consuming the contract in one motion with nothing to check
       it against
 
-### Follow-ups this phase opened, all of them `apps/api`
+### Follow-ups this phase opened
 
-The console was scoped to `apps/web` only, so each of these is recorded rather
-than fixed:
+The console was scoped to `apps/web`. The one item below that is a *defect*
+rather than a missing shape was fixed here anyway, because shipping a console
+whose search screen 500s on a filter the brief requires is not a boundary worth
+keeping. The rest are recorded, not fixed:
 
-- **`GET /search?amenity=…` is 500, always.** A defect, not a limitation — see
-  the progress entry below for the root cause and the one-line fix.
+- [x] **`GET /search?amenity=…` was 500 for every input.** Fixed, with a
+      database-backed regression test that fails without the fix. Root cause in
+      the progress entry below.
 - **No `GET /rooms/:id`.** `/search` cannot filter by id, so a room's name,
   venue and rate cannot be fetched for a room already chosen. The console
   carries them on the link instead and degrades to the id on a bare deep link.
@@ -924,13 +927,13 @@ depends on the venue administration screen, which is P7.
 
 ### 2026-08-24 — P7 complete (the operations console)
 
-Six screens on `apps/web`, and nothing outside it. The API, Paygate, the schema
-and the deployment files were not touched, which is why five of the findings
-below are recorded as follow-ups rather than fixed.
+Six screens on `apps/web`, plus one `apps/api` line and the test that pins it.
+Paygate, the schema and the deployment files were not touched.
 
 The phase's useful output is not the screens. It is four defects — one in the
-API that no test covers, and three in the console that typecheck and
-`next build` both passed clean and that only a browser could find.
+API that no test covered and that had never worked, and three in the console
+that typecheck and `next build` both passed clean and that only a browser could
+find.
 
 ---
 
@@ -939,21 +942,43 @@ edge case: `?amenity=wifi` is a 500, and so is every combination containing an
 amenity. The brief names amenities as one of the combinable search filters, so
 this is a required filter that has never worked.
 
-The cause is in `apps/api/src/search/search.service.ts`:
+The cause was in `apps/api/src/search/search.service.ts`:
 
-```sql
-${rooms.amenities} @> ${query.amenity}::text[]
+```ts
+${rooms.amenities} @> ${query.amenity}::text[]        // before
+${rooms.amenities} @> ${sql.param(query.amenity)}::text[]   // after
 ```
 
-Drizzle binds the JavaScript array as a single parameter and node-postgres sends
-it as the scalar `wifi`, so Postgres is asked to cast the *string* `'wifi'` to
-`text[]` and answers `22P02 malformed array literal: "wifi"`. It needs
-`sql.param()` or an explicit array construction; it is one line.
+Drizzle expands a bare JS array in a `sql` template into one placeholder per
+element, so the predicate compiled to `@> ($1)::text[]` bound to the *string*
+`wifi`, and Postgres answered `22P02 malformed array literal: "wifi"`.
+`sql.param` binds the array as one parameter and lets the driver encode it.
 
-It survived six phases because **nothing tests it**. There is no amenity case in
-`tests/`, and the search endpoint's own coverage exercises city, capacity and
-price. The console found it in the first minute of being pointed at real data,
-which is the argument for the console being worth building at all.
+The repository already knew about this trap. `uuidArray` in
+`bookings/equipment-availability.ts` exists for exactly it, and its doc comment
+describes the same `malformed array literal` failure — the hold path hit it
+first. The search endpoint simply never got the same treatment. Both call sites
+in that file were re-checked while fixing this; the second one is correct, and
+the amenity predicate was the only remaining instance in `apps/api`.
+
+Amenities are free text off a query string, so the fix binds the array rather
+than building a literal the way `uuidArray` does: there is no literal to escape,
+and a value containing `{` or `,` is data instead of syntax. There is a test for
+that case.
+
+**It survived six phases because nothing tested it.** No amenity case anywhere
+in `tests/`, and the endpoint's own coverage exercised city, capacity and price.
+`apps/api/src/search/search.amenity.test.ts` now covers it: it builds its own
+venue and rooms, asserts that containment is AND rather than OR, that an unknown
+amenity returns zero rows instead of throwing, that the repeated and
+comma-separated forms agree, and that array punctuation in a value is data. All
+six cases fail with `malformed array literal` against the old binding.
+
+It is a database-backed suite on purpose. A unit test against the query builder
+would have passed just as happily with the broken binding, since the predicate,
+the operator and the shape were all correct — only Postgres could tell you. It
+skips when `DATABASE_URL` is absent, and CI provisions one and applies the
+migrations, so it runs there.
 
 The UI does not work around it. It renders the API's own message, and a 5xx now
 says in one line that the failure is the server's rather than the filter's,
@@ -1028,6 +1053,12 @@ one, and copy telling the customer to press the button again because the
 idempotency key is derived from the booking id. Tenant isolation was checked
 through the console: a VENUE_ADMIN of venue B opening a venue A booking gets the
 404 page, a VENUE_STAFF sees 3,479 bookings and a PLATFORM_ADMIN sees 25,003.
+
+The amenity fix was verified the same way: the six new cases red against the old
+binding and green against the new one, then the rebuilt API queried directly
+(20 rooms with `wifi`, 10 with `wifi` and `blackout`, 0 with `helipad`, and the
+combined query reporting all three filters applied), then the same query through
+the console, which now renders rows where it rendered the API's 500.
 
 **Not verified.** The deployed instance's booking flow. Its database is not
 seeded, so search there returns nothing and there is no room to hold. Everything
