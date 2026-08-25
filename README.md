@@ -196,7 +196,12 @@ nginx/nginx.conf   round-robin LB over the three replicas
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
 
-**Current phase: P8 phase A complete — the Tier 1 correctness gaps.** The
+**Current phase: P8 phase A complete — the Tier 1 correctness gaps, in two
+passes.** The second pass found that the payment provider had no memory across
+a restart, which made INV-5 undemonstrable rather than merely inconvenient; it
+has a durable ledger now, and `tests/e2e/src/provider-restart.e2e.test.ts` pays
+a booking, restarts the container and refunds it.
+ The
 overbooking buffer a venue admin may set is now settable, and proven end to end
 through the endpoints rather than around them; equipment line items are
 reachable by the only role that books; a room can be read by its own id; and
@@ -302,18 +307,29 @@ features — the more expensive kind to leave undocumented.
   starting today listed slots that had already happened and clicking the first
   one answered "must start at least 60 minutes ahead". Advising the impossible
   is a different and worse thing than losing a race.
-- **Seeded charges are synthetic, so a seeded booking's refund cannot settle.**
-  The seed invents `ch_seed_<uuid>` for the payments behind its CONFIRMED,
-  COMPLETED and REFUNDED bookings; Paygate is a separate process with its own
-  store and has never heard of them. Cancelling a *seeded* confirmed booking
-  therefore quotes the correct refund, cancels correctly, mints the refund key —
-  and the provider answers `404 unknown_charge`, so the money never comes back
-  and `GET /admin/reconciliation` reports `refund_initiated_not_settled`. The
-  report is right; the seed is what is lying, and the API now records the
-  provider's own rejection on the payment row so the two can be told apart. **A
-  booking made through the console refunds for real.** The three ways to make
-  seeded money real were considered and all are worse; `seedPayments` in
-  `apps/api/src/db/seed.ts` says which and why.
+- **Paygate keeps a durable ledger, and it did not until P8.** It held every
+  charge in memory, which meant Render's free tier — asleep after fifteen idle
+  minutes — forgot everything it had captured, and the next refund answered
+  `404 unknown_charge`. That is not a demo-data quirk: INV-5 cannot be
+  demonstrated against a provider that cannot remember what it captured, and the
+  API's poll-the-provider recovery path could only ever be told "never heard of
+  it". Paygate now has its own `paygate_*` tables, its own migrations, no import
+  and no foreign key across the boundary, and the seed registers its charges
+  with them — so seeded and live bookings both refund for real. The reversal,
+  including what it costs, is [DECISIONS.md](DECISIONS.md) 13.
+- **Paygate shares the API's Postgres instance, and that is a cost constraint
+  rather than coupling.** The free tier gives one instance. Everything that
+  would make it coupling is absent and checkable: no import from
+  `apps/api/src/db`, no Drizzle dependency at all, no foreign key crossing in
+  either direction, a separate `PAYGATE_DATABASE_URL`, and
+  `paygate_charges.reference` holding the booking id as an opaque string exactly
+  as a real provider's `metadata.reference` does. Pointing that variable at a
+  different database is the whole of what separating them takes.
+- **Re-seeding leaves orphaned rows in Paygate's ledger.** The seed truncates
+  the API's tables and mints new booking ids, so the previous run's charges stay
+  at the provider with nothing pointing at them. Left alone deliberately: a real
+  provider does not forget because a merchant reset their own database, and a
+  destructive "clear the provider" endpoint would be a worse thing to own.
 - **The 15-minute turnaround applies to rooms only.** Equipment uses raw
   `starts_at`/`ends_at`, not the buffered `slot` column. A tripod handed back at
   14:00 is available at 14:00. ARCHITECTURE.md, Assumption 7.

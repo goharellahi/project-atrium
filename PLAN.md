@@ -356,6 +356,18 @@ keeping. The rest are recorded, not fixed:
 - [x] Console: role-appropriate navigation, a reconciliation screen for the only
       role that can call it, honest scope wording for a customer, one time
       convention applied everywhere and labelled, styled date controls
+- [x] **Paygate keeps a durable ledger** — its own `paygate_*` tables, its own
+      migrations, no import and no foreign key across the boundary. Reverses
+      P3's "a test double needs no database", which was right about INV-3 and
+      wrong about INV-5: a provider that forgets on restart cannot participate
+      in a proof that no money was lost, and the free tier forgets every fifteen
+      idle minutes. DECISIONS.md 13
+- [x] The seed registers its charges with that ledger — one signed bulk import
+      in batches, not 20,722 HTTP charges — so a seeded booking refunds for real
+- [x] `charge_accepted_not_settled`, the ninth reconciliation class. Its absence
+      is what let an amnesiac provider hide money: the poll asked, was told
+      "never heard of it", read that as "nothing was captured", and no check
+      disagreed
 
 ## P8 phase B — the final documents · `docs/p8-final`
 
@@ -1580,3 +1592,105 @@ Deploying is a merge and a Render/Vercel action, and this repository's working
 agreement is that the human owns the remote. Until that happens, **Tier 1 is
 correct and tested but not deployed**, and the brief's rule means Tier 2 does not
 start.
+
+---
+
+### 2026-08-25 — P8 phase A, second pass: the provider had amnesia
+
+The first pass closed the six Tier 1 gaps and found, on the way, that a seeded
+booking's refund could never settle: the seed minted `ch_seed_<uuid>`, Paygate
+had never heard of it, and the cancellation produced `404 unknown_charge`. That
+was written up as a seed limitation with three rejected workarounds.
+
+**The diagnosis was wrong, and the correction is the interesting part.** Paygate
+held its whole ledger in memory. Render's free tier sleeps after fifteen idle
+minutes — so a charge created through the *console* has exactly the same fate
+after one cold start. The seed was not the defect; it was the first place the
+defect was visible, because seeded charges were born already forgotten.
+
+That reframes it from a demo-data inconvenience to an **INV-5 failure**. "Money
+is never silently lost, provable via a reconciliation endpoint returning zero
+discrepancies" cannot be demonstrated against a provider that cannot remember
+what it captured. And it made the API's own recovery path inert: asking a
+provider for an outcome it structurally cannot remember always answers "never
+heard of it", and `settleAcceptedCharges` was treating that as an answer. The
+comment there said so out loud — *"There is nothing to apply and nothing was
+captured; the hold expires"* — which is an inference from amnesia to absence.
+
+#### What changed
+
+**Paygate has a durable ledger.** Four tables, all prefixed `paygate_`, created
+by Paygate's own forty-line migration runner against its own history table. The
+boundary is enforced rather than asserted: no import from `apps/api/src/db`, no
+Drizzle dependency at all, no foreign key crossing in either direction, a
+separate `PAYGATE_DATABASE_URL`. `paygate_charges.reference` holds the booking
+id as an opaque string exactly as a real provider's `metadata.reference` does.
+One Postgres instance is a hosting cost — the free tier gives one — and pointing
+that variable elsewhere is the whole of what splitting them takes. Written up in
+ARCHITECTURE.md §4 and DECISIONS.md 13; the original P3 reasoning is left in
+place rather than rewritten.
+
+**In-memory is still there, demoted.** `PAYGATE_STORE=memory` selects it, for
+the 39 unit tests that assert the idempotency contract and the chaos rates and
+buy nothing from durability. `PAYGATE_STORE=postgres` with no URL is a boot
+failure, not a fallback — a silent fallback is how a deployment ends up on the
+broken store with nobody having chosen it. `/health` reports which is live.
+
+**Two races got safer on the way.** `openCharge` claims its Idempotency-Key with
+`INSERT … ON CONFLICT DO NOTHING RETURNING`; `openRefund` takes `FOR UPDATE`
+before checking `refunded_minor + amount <= amount_minor`. Both were safe in
+memory only because Node does not interleave between a read and a write, which
+is an accident rather than a design.
+
+**The seed hands its charges over** — 20,722 of them in about a dozen signed,
+batched calls to `POST /paygate/_ledger/import`, not 20,722 HTTP charges. It
+asks Paygate rather than writing `paygate_charges` itself, even though it holds
+a connection to the same instance: a boundary the seed may reach through is not
+a boundary. The import route authenticates with the same HMAC Paygate signs its
+webhooks with, which is why — unlike `/_test/*` — it can exist under
+`NODE_ENV=production`, where the demo data that needs it lives.
+
+**The API stopped inferring absence from amnesia.** A 404 from the provider for
+a charge id the provider itself issued now changes no state, records the reason
+on the payment, and leaves it PENDING to be reported. Which needed somewhere to
+be reported: `charge_accepted_not_settled` is the ninth reconciliation class,
+and its absence is what let this hide. The refund side has had
+`refund_accepted_not_settled` since P4; the charge side had nothing, so a
+payment sitting PENDING forever with a provider charge id against it was
+invisible to the one report whose job is finding money nobody is accounting for.
+
+#### Verified
+
+```
+pnpm test    42 paygate (3 new, on the ledger guard) + 29 api + 18 web + 1 census
+             + 6 database-backed api tests            -> 96 offline
+pnpm authz   37
+pnpm proof   5 — 200 concurrent holds through the durable provider, 0 5xx,
+             api1=135 api2=132 api3=133
+pnpm e2e     31 — 22 payment integrity, 6 buffer, 3 provider restart
+```
+
+`tests/e2e/src/provider-restart.e2e.test.ts` is the test that could not be
+written before, because it would have failed by construction. Pay, confirm,
+restart the container, refund — and the refund settles. It proves the restart
+actually happened rather than assuming it: `/health` reports `started_at`, so a
+`docker compose restart` that quietly did nothing cannot make it pass for the
+wrong reason.
+
+**Run against `PAYGATE_STORE=memory` on the same image, all three of its tests
+fail.** Against the durable ledger all three pass. A test that cannot fail
+against the bug it was written for is not evidence, and that check is the reason
+to believe this one.
+
+By hand, which is where it started: cancelling a seeded CONFIRMED booking 4,414
+hours out quotes 100% under its frozen tiers, refunds 14,000, and lands
+`REFUNDED` with a real refund id and no failure reason. Before this pass it
+landed `CANCELLED` with a refund key, no refund id, and `404 unknown_charge` in
+the log.
+
+#### Still not deployed
+
+Unchanged from the first pass and now with more to deploy: the Render service
+needs `PAYGATE_DATABASE_URL` and `PAYGATE_STORE=postgres` set before Paygate
+will boot at all — that refusal is deliberate, and it is the one dashboard step
+that cannot be skipped.
