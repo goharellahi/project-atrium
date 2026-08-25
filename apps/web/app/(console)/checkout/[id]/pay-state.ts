@@ -12,6 +12,7 @@ export type PayOutcome =
   | 'accepted'
   | 'replayed'
   | 'transient'
+  | 'rate_limited'
   | 'no_answer'
   | 'conflict'
   | 'error';

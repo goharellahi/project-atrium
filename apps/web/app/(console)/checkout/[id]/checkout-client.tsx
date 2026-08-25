@@ -384,6 +384,18 @@ function StateCard({
     );
   }
 
+  if (payState.outcome === 'rate_limited') {
+    return (
+      <Callout tone="warn" title="The payment provider is rate limiting us.">
+        This is not the chaotic-failure branch and not a decline — the request
+        never reached the provider, so nothing was charged. Wait a minute and
+        press{' '}
+        <strong className="font-medium text-ink">Retry the charge</strong> once.
+        Pressing repeatedly is what keeps the limit closed.
+      </Callout>
+    );
+  }
+
   if (payState.outcome === 'no_answer') {
     return (
       <Callout

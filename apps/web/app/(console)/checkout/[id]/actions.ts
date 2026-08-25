@@ -52,8 +52,22 @@ export async function payForBooking(
       // 502 — the provider rejected the request. The chaotic branch.
       // 503 — the provider never answered. The charge may nonetheless exist.
       if (err.status === 502 || err.status === 503) {
+        // A 502 wraps whatever the provider said, and not all of it is the
+        // chaos branch. Found on the deployed pair: the platform's edge
+        // rate-limits the API's outbound hop under a burst and answers 429
+        // "Too Many Requests", which arrives here as a 502 with
+        // `provider_status: 429`. Telling that customer "roughly one charge in
+        // ten, press again" is precisely the wrong advice — pressing again is
+        // what keeps them throttled. It is a distinct outcome with its own copy.
+        const providerStatus = err.get<number>('provider_status');
+
         return {
-          outcome: err.status === 502 ? 'transient' : 'no_answer',
+          outcome:
+            err.status === 503
+              ? 'no_answer'
+              : providerStatus === 429
+                ? 'rate_limited'
+                : 'transient',
           message: err.message,
           payment: null,
           detail: err.body,
