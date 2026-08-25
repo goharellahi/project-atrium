@@ -15,7 +15,11 @@ against a deliberately unreliable provider, and honest documentation.
 
 | Document | What is in it |
 | --- | --- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Concurrency strategy, assumptions, and the design record |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | ERD, state machine, concurrency strategy, payment integrity, 100x, stack justification |
+| [AI_LOG.md](AI_LOG.md) | Where the agent was wrong, and what replaced its answer |
+| [TIMELINE.md](TIMELINE.md) | Hour by hour from commit timestamps; what was cut and reversed |
+| [DECISIONS.md](DECISIONS.md) | Numbered decisions, including the ones reversed |
+| [LOAD_TEST.md](LOAD_TEST.md) | The four benchmarked endpoints, and the p95 that is missed |
 | [CLAUDE.md](CLAUDE.md) | Invariants, hard rules, pinned versions, working agreement |
 | [PLAN.md](PLAN.md) | Phases and progress log |
 | [DESIGN.md](DESIGN.md) | Visual direction for the console |
@@ -193,189 +197,95 @@ nginx/nginx.conf   round-robin LB over the three replicas
 
 ## Known Issues and What I Did Not Finish
 
-*Kept blunt and current. A known, documented bug costs almost nothing; an
-undocumented one found in review costs a great deal.*
+*Blunt and current. A known, documented bug costs almost nothing; an
+undocumented one found in review costs a great deal. Everything below is either
+measured or reproduced, not suspected.*
 
-**Current phase: P8 phase A complete — the Tier 1 correctness gaps, in two
-passes.** The second pass found that the payment provider had no memory across
-a restart, which made INV-5 undemonstrable rather than merely inconvenient; it
-has a durable ledger now, and `tests/e2e/src/provider-restart.e2e.test.ts` pays
-a booking, restarts the container and refunds it.
- The
-overbooking buffer a venue admin may set is now settable, and proven end to end
-through the endpoints rather than around them; equipment line items are
-reachable by the only role that books; a room can be read by its own id; and
-every seeded settled booking carries the cancellation policy that was live when
-it confirmed, so the policy-as-data guarantee is visible on demo data instead of
-merely true in code. The Tier 3 cut is withdrawn — the deadline was extended and
-the whole brief is in scope.
+**Status: complete and submitted.** Tier 1 and Tier 2 are built, deployed and
+verified. Tier 3 is not built, and that was a choice — see `TIMELINE.md`.
 
-P7 before it delivered the operations console: six screens on `apps/web` —
-sign-in with the seeded role logins on the page, cross-venue search, room
-availability and hold, checkout with a live hold countdown and the chaotic
-payment path, my bookings with cancellation, and a read-only venue view.
+### Deployment and infrastructure
 
-Building it found **an API defect that had been there since the endpoint was
-written**: `GET /search?amenity=…` answered 500 for every input, because Drizzle
-expanded the array into one placeholder per element and Postgres was handed
-`('wifi')::text[]`. It is fixed here, and `apps/api/src/search/search.amenity.test.ts`
-pins it against a real database — a unit test on the query builder would have
-passed either way, which is why it survived six phases with no test on it.
+- **The deployed API runs a single instance.** The three-replica configuration is
+  `docker-compose.yml` only, and that is where the concurrency proof runs. The
+  property the whole design turns on — that the invariants hold across replicas
+  because Postgres enforces them rather than application memory — is therefore
+  *demonstrated* locally and only *asserted* in production. Render's free tier
+  does not do horizontal scaling.
+- **Both services sleep after 15 idle minutes.** The first request wakes them and
+  takes 30–60 seconds. That is the free tier, not the application, but a reviewer
+  who does not know it will read the first page load as broken.
+- **Render's free Postgres expires 30 days after creation.** After that the
+  deployed instance has no database and every authenticated route fails. This one
+  was created on 23 August 2026.
+- **The API's outbound hop to Paygate is rate-limited by the platform edge.**
+  Rapid retries return plain-text `429 Too Many Requests`, which the API wraps as
+  a 502 carrying `provider_status: 429`. It is transient — one attempt succeeds
+  roughly a minute later — and the console now says so specifically instead of
+  presenting it as the provider's chaotic-failure branch. Paced payments are
+  unaffected; hammering the pay button is not.
+- **Re-seeding orphans the previous run's charges in Paygate's ledger.** The seed
+  truncates the API's tables and registers fresh charges; the old ones remain on
+  the provider side with no booking to match, and reconciliation correctly reports
+  them as `capture_without_confirmation`. They are artefacts of re-seeding, not
+  lost money. The workaround is to re-seed Paygate's database too. There is no
+  generation marker that would make a stale charge self-identifying, and there
+  should be.
 
-The four endpoints the brief benchmarks were run against 250,000 bookings
-through the load balancer. **Three of the four p95 targets are met; create-hold
-misses at 536 ms against 250 ms** — and the cause is measured rather than
-guessed. Numbers, machine spec, `EXPLAIN` before and after, and the elimination
-that found the real bottleneck are in [LOAD_TEST.md](LOAD_TEST.md).
+### Testing and CI
 
-Three indexes were added because a plan changed, two deleted, and **two built,
-measured and rejected** — one of which turned out never to be used as an index
-at all and to be supplying a planner *estimate*. That finding is in
-[ARCHITECTURE.md](ARCHITECTURE.md) §5, along with §8, which grounds "what breaks
-at 100x" in plans captured by widening real queries until they saw that density.
+- **CI runs the offline suites only — 96 tests.** `pnpm authz`, `pnpm proof` and
+  `pnpm e2e` all need the compose stack, so **"CI green" currently means the unit
+  tests pass**, while the tenant-isolation suite, the 200-request proof and the
+  payment end-to-end are exactly what a regression would break silently. A
+  compose-backed job is item 5 in `ARCHITECTURE.md` §9, and was deliberately not
+  attempted in the final phase rather than half-done.
+- **The concurrency proof asserts a three-replica topology and fails without
+  one.** Correct behaviour, and worth knowing before running it: the invariant
+  assertions themselves pass against a single replica, but the run is not
+  certified, because a single-replica pass does not demonstrate the claim.
+- **`create-hold` misses its p95 target: 536 ms against 250 ms.** Published as a
+  failing threshold rather than re-run in isolation until it passed. The endpoint
+  answers in 47 ms p95 on its own, so it is starved rather than slow — three Node
+  replicas pinned at one core each on a four-core laptop, with the load generator
+  on the same box. `LOAD_TEST.md` §5 has the elimination; `DECISIONS.md` 12 has
+  why it was accepted rather than fixed.
+- **Reconciliation takes 5.2 seconds at 250,000 bookings** and degrades badly —
+  `ARCHITECTURE.md` §8. It is INV-5's only evidence, which makes it the slow query
+  that matters most.
 
-P5 found seven defects in code earlier phases had called complete, including one
-that meant the payment path had never worked at all. P6 found four more —
-including a seed whose row counts were all correct and whose *distribution* made
-the benchmark meaningless. They are itemised in the P5 and P6 entries of
-[PLAN.md](PLAN.md), which is the honest record of this project.
+### Not built
 
-The API is deployed on Render's free tier and the console on Vercel; both answer
-`/health`. **The deployed database is not seeded** — seeding runs against the
-local compose stack.
-
-### Not built yet
-
-Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
-
-- **The venue administration SCREENS.** The API half landed in P8 —
-  `PATCH /venues/settings` writes the overbooking buffer, `POST`/`PATCH
-  /venues/rooms` and `/venues/equipment-types` manage inventory, all
-  VENUE_ADMIN-only and venue-scoped from the token, all probed by the INV-6
-  suite. There is no console for them yet; that is Tier 2.
-- **Revenue and utilisation page.** The API half landed in P6 and answers; there
-  is no screen rendering it. Outside P7's six screens.
-- **Two of the four API shapes the console worked around are still open.** There
-  is no refund preview, so `apps/web/lib/refund.ts` re-implements the arithmetic
-  and labels it a quote; and the API sets no CORS headers, which is why every
-  call the console makes is server-side. The other two closed in P8:
-  `GET /rooms/:id` exists, and `GET /rooms/:id/equipment-types` is the
-  customer-readable catalogue, so the room screen no longer carries the room on
-  its querystring and no longer asks a customer to paste a UUID.
-- **Create-hold's p95 is missed, and the miss is deliberate.** 536 ms against a
-  250 ms target. The endpoint answers in 47 ms p95 in isolation, so it is starved
-  rather than slow: three Node replicas pinned at one core each on a four-core
-  laptop, with the load generator on the same box. Two candidate causes were
-  tested and both were wrong — not the database, not the connection pool.
-  Published as a failing threshold rather than re-run in isolation until it
-  passes. [LOAD_TEST.md](LOAD_TEST.md) §5 has the elimination;
-  [DECISIONS.md](DECISIONS.md) 12 has why it was accepted rather than fixed.
-
-### Tests that do not exist yet, and should
-
-Stated separately from the above because these are gaps in *evidence*, not in
-features — the more expensive kind to leave undocumented.
-
-- **CI runs 69 of 121 tests.** The offline suites and the route census run on
-  every push; the concurrency proof, the tenant-isolation probes, the
-  payment-integrity suite and the soak all need a compose stack CI does not
-  stand up. They run locally via `pnpm proof`, `pnpm authz`, `pnpm e2e` and
-  `pnpm soak`.
-- **The state machine's runtime edges are covered end to end, not per edge.**
-  The transition *table* is asserted exhaustively offline; the row lock, the
-  one-audit-row-per-transition rule and the 409 body are exercised by the proof
-  and the e2e suite rather than by a dedicated unit suite. Those need a real
-  Postgres.
-- **The benchmark is one machine's.** Every number in
-  [LOAD_TEST.md](LOAD_TEST.md) comes from a single four-core laptop with the
-  load generator co-resident, over 60-second runs. The saturation analysis is
-  sound on that box and untested on any other, and nothing there says what the
-  gist index costs to maintain under sustained write load over days.
+- **Tier 3 entirely** — recurring bookings, waitlists, dynamic pricing. Not
+  started. The reasoning, and what the time went to instead, is in `TIMELINE.md`.
+- **The revenue and utilisation page.** The API exists and is one of the four
+  endpoints benchmarked in `LOAD_TEST.md`; no screen renders it. Skipped in the
+  final phase under an explicit time bound rather than rushed.
+- **A compose-backed CI job.** Same call, same reason.
+- **A customer-facing venue browse.** Search is room-first; no page lists a venue
+  and its rooms together.
 
 ### Known limitations of what *is* built
 
-- **The deployed instance runs one API replica, not three.** Free tiers do not
-  stretch to three. The three-replica configuration is local-only, via
-  `docker compose`, which is where the concurrency proof runs. The correctness
-  argument does not depend on replica count — the mechanisms are in Postgres —
-  but the deployment does not itself demonstrate that.
-- **Availability is advisory, deliberately.** `GET /rooms/:id/availability` can
-  offer a slot that a hold then rejects, because someone took it in between.
-  This is not a defect to be engineered away — it is why the hold path does not
-  consult it. It does *not* offer a slot that could never have worked: until P8
-  it enumerated from the venue's opening time regardless of the hour, so a range
-  starting today listed slots that had already happened and clicking the first
-  one answered "must start at least 60 minutes ahead". Advising the impossible
-  is a different and worse thing than losing a race.
-- **Paygate keeps a durable ledger, and it did not until P8.** It held every
-  charge in memory, which meant Render's free tier — asleep after fifteen idle
-  minutes — forgot everything it had captured, and the next refund answered
-  `404 unknown_charge`. That is not a demo-data quirk: INV-5 cannot be
-  demonstrated against a provider that cannot remember what it captured, and the
-  API's poll-the-provider recovery path could only ever be told "never heard of
-  it". Paygate now has its own `paygate_*` tables, its own migrations, no import
-  and no foreign key across the boundary, and the seed registers its charges
-  with them — so seeded and live bookings both refund for real. The reversal,
-  including what it costs, is [DECISIONS.md](DECISIONS.md) 13.
-- **Paygate shares the API's Postgres instance, and that is a cost constraint
-  rather than coupling.** The free tier gives one instance. Everything that
-  would make it coupling is absent and checkable: no import from
-  `apps/api/src/db`, no Drizzle dependency at all, no foreign key crossing in
-  either direction, a separate `PAYGATE_DATABASE_URL`, and
-  `paygate_charges.reference` holding the booking id as an opaque string exactly
-  as a real provider's `metadata.reference` does. Pointing that variable at a
-  different database is the whole of what separating them takes.
-- **Re-seeding leaves orphaned rows in Paygate's ledger.** The seed truncates
-  the API's tables and mints new booking ids, so the previous run's charges stay
-  at the provider with nothing pointing at them. Left alone deliberately: a real
-  provider does not forget because a merchant reset their own database, and a
-  destructive "clear the provider" endpoint would be a worse thing to own.
-- **The 15-minute turnaround applies to rooms only.** Equipment uses raw
-  `starts_at`/`ends_at`, not the buffered `slot` column. A tripod handed back at
-  14:00 is available at 14:00. ARCHITECTURE.md, Assumption 7.
-- **Four routes are cross-venue by design.** `GET /search`,
-  `GET /rooms/:id`, `GET /rooms/:id/availability` and
-  `GET /rooms/:id/equipment-types` return catalogue data — name, capacity,
-  amenities, price, hourly rate, units owned, free/busy — and no bookings,
-  customers, revenue or live utilisation. They are listed in the census as
-  `CROSS_VENUE_BY_DESIGN` with a written reason each, and the census requires
-  every one of them to *also* be probed: the assertion is not a denial, it is
-  that the response body carries only inventory. ARCHITECTURE.md, Assumption 8.
-- **A payment cannot be re-attempted after a decline.** The charge idempotency
-  key is derived from the booking id, so `FAILED` is terminal and the customer
-  books again. That matches the brief's own state machine, which gives `FAILED`
-  no outgoing edge. DECISIONS.md, entry 1.
-- **Paygate keeps its state in memory.** Restarting it — routine on a sleeping
-  free tier — forgets every charge. The API treats “the provider has never heard
-  of this charge” as an answer and lets the hold expire; no money moved, so
-  nothing is lost.
-- **A webhook refused during a cold start is lost permanently.** Paygate does
-  not retry a delivery, by design — a retry would be a second source of
-  duplicates on top of the specified 30%. The API therefore polls the provider
-  for charge and refund outcomes it was never told about
-  (`CHARGE_POLL_AFTER_SECONDS`, `REFUND_POLL_AFTER_SECONDS`). Found by the P5
-  soak, which lost six refunds to the 2% corrupt-signature branch before this
-  existed.
-- **The 15-minute turnaround gap is a platform constant, not per-venue.** It is
-  baked into a generated column, and a generated column cannot reference
-  another table. Reasoning in ARCHITECTURE.md, Assumption 5.
-- **On Render, migrations run in-process at boot** (`RUN_MIGRATIONS_ON_BOOT=true`),
-  not as a pre-deploy step and not via a shell command. The free tier rejects
-  `preDeployCommand` outright, and `dockerCommand` is not run through a shell,
-  so `sh -c "a && b"` exits 127. Ordering is unchanged — the server does not
-  bind until migrations succeed, and a failure rejects the boot. Safe only
-  because that service runs a single instance; `docker compose` leaves the flag
-  off and uses a separate one-shot `migrate` service, because three replicas
-  each migrating on boot would race.
-- **`migrate` has no healthcheck** while every other compose service does. It
-  is a one-shot container that exits; the replicas depend on it with
-  `condition: service_completed_successfully`, which is the meaningful check.
-- **`output: 'standalone'` is scoped to the Docker build.** It exists so the
-  runtime image can `node server.js` without pnpm. Vercel does its own
-  packaging, so the flag is disabled when `VERCEL` is set. `apps/web/vercel.json`
-  deliberately carries no `installCommand` or `buildCommand`: Vercel detects the
-  pnpm workspace from the repo root itself, and overriding install broke its
-  Next.js version detection.
-- **Local Node is 22, the pin is 26.** Containers use `node:26-alpine`, so
-  compose and CI are on the pinned runtime. Only host-side `pnpm` commands run
-  on 22.
+- **The console shows a venue as a short id, not a name.** `/auth/me` returns
+  `venueId` only, and the sole endpoint exposing a venue's name is the revenue
+  report, which runs four aggregates and demands a date range. Spending that on a
+  sidebar label was the wrong trade; "a missing read endpoint" is the honest
+  description.
+- **`GET /admin/reconciliation` requires `from` and `to`.** Omitting them returns
+  422 with `expected date, received Date` — a zod-v4 phrasing quirk for a missing
+  required parameter rather than a bug, and it reads like one.
+- **The equipment sweep line is unbounded, in two different query plans**, and it
+  runs inside the hold transaction while holding `FOR UPDATE`. Measured, with both
+  plans, in `ARCHITECTURE.md` §8.
+- **`hashtext(room_id)` can collide**, so two unrelated rooms may serialise
+  against each other on the same advisory lock. Invisible until it is a latency
+  mystery.
+- **Building natively rather than through Docker needs two manual copies.** `tsc`
+  and `nest build` do not copy `.sql` files, so `dist/db/migrations` and
+  `dist/ledger/migrations` have to be copied by hand. Both Dockerfiles do it;
+  only the Docker path is supported, and this is why.
+- **The console's client-side behaviour is unverified against the deployed URL
+  from CI.** It was verified in a real browser against the same build locally,
+  and the deployed screens were verified server-rendered per role. Stated because
+  the distinction is real.

@@ -371,13 +371,15 @@ keeping. The rest are recorded, not fixed:
 
 ## P8 phase B — the final documents · `docs/p8-final`
 
-- [~] `DECISIONS.md` — 11 entries written in P4 and P5 as the decisions were
-      made; the P0–P2 ones still live in `ARCHITECTURE.md` §3 and §7 and fold in
-      here
-- [ ] `AI_LOG.md` — what was delegated, where the agent was wrong or naive
-- [ ] `TIMELINE.md` — hour by hour, what was cut, why
-- [ ] `ARCHITECTURE.md` stubs completed: ERD, state machine, payment integrity,
-      indexing, stack justification, 100x, two more weeks
+- [x] `DECISIONS.md` — 13 entries, including the two reversals
+- [x] `AI_LOG.md` — 13 numbered defects plus the smaller ones, and the direction
+      that did not come from the agent
+- [x] `TIMELINE.md` — hour by hour from commit timestamps, the cuts, the six
+      reversals, and why Tier 3 was not built
+- [x] `ARCHITECTURE.md` stubs completed: §1 ERD, §2 state machine, §6 stack
+      justification, §9 two more weeks, and `charge_accepted_not_settled` folded
+      into §4. All four mermaid diagrams render — verified through mermaid 11,
+      the engine GitHub uses, not by eye
 - [x] Five test logins: one per role plus a second venue admin at another venue
       — seeded, printed by the seed, and on the sign-in screen with one-click
       fill since P7
@@ -1694,3 +1696,81 @@ Unchanged from the first pass and now with more to deploy: the Render service
 needs `PAYGATE_DATABASE_URL` and `PAYGATE_STORE=postgres` set before Paygate
 will boot at all — that refusal is deliberate, and it is the one dashboard step
 that cannot be skipped.
+
+---
+
+### 2026-08-25 — P9, the written deliverables and the last verification
+
+Architecture is 35% of the score and two named deliverables did not exist. This
+phase wrote them and then tried to break the claims they make.
+
+**`ARCHITECTURE.md` — the four stubs are gone.** §1 is the ERD, drawn as two
+diagrams rather than one because the API and Paygate share no key and the absence
+of a line between them is the point; `bookings.venue_id` is marked as the
+deliberate denormalisation and the consistency obligation it creates is stated.
+§2 is the state machine with all fourteen legal transitions, each labelled with
+the `reason` string the audit trail actually records, plus a table of the
+transitions that are **deliberately absent** — `FAILED` has no outgoing edge
+because a declined charge is the end, and giving it one would let a customer
+reclaim a slot somebody else may now hold. §6 justifies the stack against a
+rejected alternative each, with the cost accepted rather than only the benefit —
+including the TypeScript 6-over-7 downgrade, which exists because Nest's DI
+depends on `emitDecoratorMetadata` and TS7 does not implement it. §9 is grounded
+in this codebase: the advisory lock's contention ceiling, the unbounded sweep
+line, the single deployed replica, CI that cannot run the compose suites.
+
+`charge_accepted_not_settled` is folded into §4 with the reasoning error that
+produced it, because that error is the most instructive thing this build turned
+up: **"the provider has no record of it" is a claim about the provider's memory;
+"no money moved" is a claim about the world.** A reconciliation suite that only
+ever compares two sources cannot see a discrepancy that erases one of them.
+
+**`AI_LOG.md`** — thirteen numbered defects, ordered by cost, each with the file,
+the symptom, why the first answer was wrong and what replaced it. The through-line
+is uncomfortable enough to be worth stating: the three most expensive were all
+cases where the agent wrote the correct reasoning in a comment and then did
+something else in the code. Recorded separately: the direction that did not come
+from the agent, because the brief's real question is architect or passenger.
+
+**`TIMELINE.md`** — derived from `git log`, not memory, and it does not round the
+history into something tidier than it was. The design-before-code checkpoint was
+**missed in absolute terms** — the brief arrived Friday evening, Saturday was
+lost to travel, the first commit is Sunday 06:06 — and that is stated first,
+before the mitigation that the first commit is nonetheless the concurrency
+strategy and no hold endpoint existed for another three and a half hours.
+
+**Verification.** Docker is unavailable in this environment, so `docker compose
+up --build` could not be run. Instead the stack was stood up natively against a
+fresh database — Postgres, Paygate with its durable ledger, the API, seeded
+`demo` — and the real suites were pointed at it:
+
+```
+pnpm test    96 passed          (offline: api, paygate, web × 5 timezones, authz unit)
+pnpm authz   37 passed          INV-6, including the route census
+pnpm e2e     29 passed, 2 skip  INV-3, INV-4 with the audit sequence, INV-5 at zero,
+                                the overbooking buffer, provider-restart durability
+pnpm proof   INV-1: 201 ×1, 409 ×199        the database agrees: one active booking
+             INV-2: 201 ×3, 409 ×197        peak never exceeds units_owned
+             3 assertions FAILED: "touched all three replicas" — 1 replica available
+```
+
+The proof result is worth being precise about. **The invariants held**; what
+failed is the suite's assertion that the run spanned three replicas, which it
+could not, because there is no Docker here to run three. That is the suite
+behaving correctly — it refuses to certify a single-replica pass, since a
+single-replica pass does not demonstrate the claim the design makes. The
+three-replica run remains the one in Appendix A.
+
+**On the deployed instance**, end to end: five accounts with correct roles and
+venue scopes; search on three combined filters returning 7 rooms; hold →
+pay → webhook → CONFIRMED; cancel at 59.3 hours before start landing on the 48h
+tier and refunding 28000 of 28000; and reconciliation as PLATFORM_ADMIN reporting
+**`discrepancy_count: 0`** across 706,438,000 minor captured and 7,263 confirmed
+bookings.
+
+One rate-limit 429 was hit on the first payment attempt and cleared on the
+second, which is the platform-edge throttle already documented in the README.
+
+**Cut, and recorded rather than half-done:** the revenue and utilisation page,
+and a compose-backed CI job. Both were explicitly time-bounded and both exceeded
+it; they are in the README's Known Issues and in §9 rather than started.

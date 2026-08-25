@@ -15,15 +15,320 @@
 
 ## 1. Entity Relationship Diagram
 
-*Stub — P1. Mermaid ERD covering Venue, Room, EquipmentType, User, Booking,
-BookingLineItem, Payment, AuditEvent.*
+Eleven tables in the API's database and four in Paygate's. They are drawn as two
+diagrams rather than one, and that is the most important thing on this page:
+there is no relationship line between them because there is no foreign key,
+no shared connection string and no import. The API and the provider are joined
+only by an opaque `charge_id` string that travels over HTTP.
+
+### The API
+
+```mermaid
+erDiagram
+    VENUES ||--o{ ROOMS : "owns"
+    VENUES ||--o{ EQUIPMENT_TYPES : "owns"
+    VENUES |o--o{ USERS : "employs"
+    VENUES |o--o{ CANCELLATION_POLICIES : "overrides platform default"
+    VENUES ||--o{ BOOKINGS : "denormalised tenant key"
+    ROOMS  ||--o{ BOOKINGS : "reserved as"
+    USERS  ||--o{ BOOKINGS : "books"
+    BOOKINGS ||--o{ BOOKING_LINE_ITEMS : "reserves equipment via"
+    EQUIPMENT_TYPES ||--o{ BOOKING_LINE_ITEMS : "reserved as"
+    BOOKINGS ||--o| PAYMENTS : "charged by"
+    BOOKINGS |o--o{ AUDIT_EVENTS : "every transition"
+
+    VENUES {
+        uuid id PK
+        text city "search filters on lower(city)"
+        text timezone "IANA; operating hours are local"
+        jsonb operating_hours "per-weekday open/close"
+        smallint overbooking_buffer_pct "equipment only; rooms reject non-zero"
+    }
+    ROOMS {
+        uuid id PK
+        uuid venue_id FK
+        integer capacity
+        bigint hourly_rate_minor "minor units, never a float"
+        text_array amenities "GIN; @> is containment, not overlap"
+        integer min_duration_minutes
+        integer max_duration_minutes
+    }
+    EQUIPMENT_TYPES {
+        uuid id PK
+        uuid venue_id FK
+        integer units_owned "the ceiling INV-2 defends"
+        bigint hourly_rate_minor
+    }
+    USERS {
+        uuid id PK
+        text email UK
+        text password_hash "argon2id"
+        enum role "CUSTOMER|VENUE_STAFF|VENUE_ADMIN|PLATFORM_ADMIN"
+        uuid venue_id FK "NULL for customers and platform admins"
+    }
+    CANCELLATION_POLICIES {
+        uuid id PK
+        uuid venue_id FK "NULL = the platform default row"
+        jsonb tiers "descending ladder, bottoming out at 0 hours"
+    }
+    BOOKINGS {
+        uuid id PK
+        uuid venue_id FK "DENORMALISED - see below"
+        uuid room_id FK
+        uuid user_id FK
+        timestamptz starts_at
+        timestamptz ends_at
+        tstzrange slot "GENERATED: ends_at + 15min turnaround"
+        enum status "the state machine in section 2"
+        timestamptz expires_at "hold TTL; NULL once CONFIRMED"
+        smallint rearm_count "checkout re-entries, capped"
+        jsonb policy_snapshot "frozen at confirmation, never re-read"
+        bigint total_minor
+    }
+    BOOKING_LINE_ITEMS {
+        uuid id PK
+        uuid booking_id FK "ON DELETE cascade - the only one"
+        uuid equipment_type_id FK
+        integer quantity
+        bigint rate_minor "the rate agreed then, not the rate now"
+    }
+    PAYMENTS {
+        uuid id PK
+        uuid booking_id FK
+        text idempotency_key UK "DERIVED from booking id"
+        text charge_id UK "opaque; the provider's, not ours"
+        bigint amount_minor
+        enum status "PENDING|SUCCEEDED|FAILED|REFUNDED"
+        text refund_idempotency_key UK "DERIVED from charge id"
+        bigint refunded_minor
+    }
+    AUDIT_EVENTS {
+        uuid id PK
+        uuid booking_id FK "nullable: some events precede a booking"
+        enum actor_type "USER|SYSTEM|PAYGATE"
+        enum from_state
+        enum to_state
+        text reason "the trigger labels in section 2"
+        timestamptz occurred_at "clock_timestamp(), not now()"
+    }
+```
+
+Two tables sit outside that graph on purpose, because they are keyed by the
+provider's identifiers rather than by ours:
+
+```mermaid
+erDiagram
+    PAYMENT_EVENTS {
+        uuid id PK
+        text charge_id "no FK - the provider owns this namespace"
+        text event "charge.succeeded, charge.failed, refund.succeeded"
+        timestamptz occurred_at
+        timestamptz applied_at
+    }
+    WEBHOOK_DELIVERIES {
+        uuid id PK
+        text delivery_id UK "the provider's; what makes replay a no-op"
+        text charge_id "nullable - an unparseable body still gets a row"
+        boolean signature_valid "recorded even when false"
+        text raw_body "TEXT, not jsonb - see AI_LOG"
+        text correlation_id
+        timestamptz processed_at
+        text error
+    }
+```
+
+### Paygate
+
+A separate service, a separate database, its own migrations. Nothing here
+references anything above and nothing above references anything here.
+
+```mermaid
+erDiagram
+    PAYGATE_CHARGES ||--o{ PAYGATE_REFUNDS : "refunded by"
+    PAYGATE_CHARGES ||--o{ PAYGATE_DELIVERIES : "notified by"
+
+    PAYGATE_CHARGES {
+        text id PK "ch_...; the string the API stores"
+        text reference "the API's booking id, opaque here"
+        bigint amount_minor
+        text idempotency_key UK "what makes a retry one charge"
+        text status "processing|succeeded|failed"
+        bigint refunded_minor
+        jsonb plan "the chaos roll, decided once and replayed"
+        integer attempts
+    }
+    PAYGATE_REFUNDS {
+        text id PK
+        text charge_id FK
+        bigint amount_minor
+        text idempotency_key UK
+        text status
+    }
+    PAYGATE_IDEMPOTENCY {
+        text scope "charge|refund"
+        text key PK
+        text resource_id
+        text fingerprint "same key, different body = conflict"
+        text outcome "accepted|failed_500"
+        integer replays
+    }
+    PAYGATE_DELIVERIES {
+        uuid delivery_id PK "travels in the webhook header"
+        text charge_id FK
+        text event
+        integer attempt
+    }
+```
+
+### What is denormalised, and why
+
+**`bookings.venue_id`** is the only deliberate denormalisation. It is reachable
+by joining `rooms`, so it is redundant data, and it is there anyway for one
+reason: **every venue-scoped query filters on it, and tenant isolation is a hard
+cap on the score.** `WHERE venue_id = $1` on the booking table is a predicate the
+planner can serve from an index without a join; `WHERE room_id IN (SELECT id FROM
+rooms WHERE venue_id = $1)` is a join that some future query will forget to
+write. INV-6 is not a feature that can be half-applied — it either holds on every
+path or it does not hold — so the column that enforces it is kept where the rows
+are.
+
+The cost is a consistency obligation: a room may never move between venues, or
+the bookings would keep the old tenant. Rooms have no update path that changes
+`venue_id`, and `ON DELETE restrict` on `rooms.venue_id` means a venue cannot be
+removed out from under one either.
+
+**`booking_line_items.rate_minor`** is the second, and it is a snapshot rather
+than a redundancy: it records the rate agreed at booking time so that a venue
+re-pricing its cameras tomorrow does not silently change what a refund is worth
+today. `bookings.policy_snapshot` is the same idea applied to the cancellation
+ladder, and for the same reason.
+
+**`payment_events` and `webhook_deliveries` carry `charge_id` as plain text with
+no foreign key.** That is not laziness. A webhook can arrive for a charge this
+database has never heard of — a delivery for a row that failed to insert, or a
+replay after a re-seed — and the correct response is to record it, not to reject
+it with a constraint violation. A foreign key here would make the audit trail
+refuse exactly the events most worth auditing.
+
+### What the diagram cannot show
+
+`bookings.slot` is a `tstzrange` **generated** from `starts_at` and `ends_at`
+plus the 15-minute turnaround, and `no_room_overlap` is a GiST exclusion
+constraint over `(room_id WITH =, slot WITH &&)` filtered to the three live
+statuses. That constraint is the entire room half of the design and it is
+invisible in an ERD, which is worth saying out loud: the most important line in
+this schema is not a relationship.
 
 ---
 
 ## 2. Booking State Machine
 
-*Stub — P4. Mermaid state diagram including every failure edge, not only the
-happy path.*
+Nine states, fourteen legal transitions, and one writer. `LEGAL_TRANSITIONS` in
+`bookings/booking-state-machine.service.ts` is the table below in code; the
+service is the only place `bookings.status` is ever assigned, and every
+transition writes exactly one `AuditEvent` inside the caller's transaction.
+
+Each edge is labelled with the `reason` string the audit trail actually records,
+so a row in `audit_events` maps onto exactly one arrow here.
+
+```mermaid
+stateDiagram-v2
+    direction TB
+
+    [*] --> DRAFT
+
+    DRAFT --> HELD : hold.created
+
+    HELD --> PENDING_PAYMENT : payment.initiated
+    HELD --> EXPIRED : hold.expired.sweeper
+    HELD --> EXPIRED : hold.expired.on_pay
+    HELD --> EXPIRED : hold.expired.on_checkout
+    HELD --> CANCELLED : customer.cancelled
+
+    PENDING_PAYMENT --> CONFIRMED : payment.captured
+    PENDING_PAYMENT --> FAILED : payment.declined
+    PENDING_PAYMENT --> EXPIRED : hold.expired.payment_arrived_late
+
+    CONFIRMED --> CANCELLED : customer.cancelled
+    CONFIRMED --> COMPLETED : booking.elapsed
+
+    CANCELLED --> REFUNDED : refund.settled
+
+    COMPLETED --> [*]
+    EXPIRED --> [*]
+    FAILED --> [*]
+    REFUNDED --> [*]
+
+    note right of HELD
+        Self-edge, not a transition:
+        hold.rearmed extends expires_at
+        and increments rearm_count.
+        Status is untouched, so it is
+        recorded as a side effect
+        rather than a state change.
+    end note
+
+    note right of EXPIRED
+        INV-4 lands here, not in CONFIRMED.
+        A charge that succeeds against a
+        lapsed hold refunds the money and
+        leaves the booking EXPIRED.
+    end note
+```
+
+### The edge the invariant is about
+
+`PENDING_PAYMENT → EXPIRED` on `hold.expired.payment_arrived_late` is INV-4, and
+it is the transition worth reading the code for. The sequence:
+
+1. The customer pays. The booking moves `HELD → PENDING_PAYMENT`, a `payments`
+   row exists, and Paygate has accepted the charge.
+2. The hold's TTL lapses while the charge is in flight — the provider is slow,
+   or the delivery is one of the 5% Paygate parks for 60–90 seconds.
+3. `charge.succeeded` arrives. The booking is **not** confirmable: its slot is no
+   longer held and another customer may already own it.
+4. The processor transitions `PENDING_PAYMENT → EXPIRED` with
+   `hold.expired.payment_arrived_late`, then mints a refund keyed on the charge
+   id and records `refund.initiated.unconfirmable_hold`.
+
+The booking ends **EXPIRED, not REFUNDED**. That reads like an inconsistency and
+is deliberate: `REFUNDED` is reachable only from `CANCELLED`, and this booking
+was never cancelled by anybody — it lapsed. The money's state lives on the
+`payments` row, which does go to `REFUNDED`; the booking's state records why the
+slot was released. Collapsing the two would lose the distinction between "the
+customer changed their mind" and "we could not honour this and gave the money
+back", which is precisely the distinction a dispute turns on.
+
+Refusing the confirmation is not enough on its own. A refusal that left the money
+captured would satisfy INV-4's letter and violate INV-5 in the same breath, so
+the refund is part of the same transaction boundary, and the ninth reconciliation
+class (`charge_accepted_not_settled`, §4) exists to catch the case where it does
+not complete.
+
+### Transitions that are deliberately absent
+
+| Absent edge | Why |
+| --- | --- |
+| `FAILED → *` | **A declined charge is the end.** The slot is released and the money never moved, so there is nothing to reverse and nothing to resume. Retrying means a new hold against current availability — not a resurrection of a booking whose slot somebody else may now hold. Giving `FAILED` an outgoing edge would let a customer reclaim a slot by retrying a dead booking. |
+| `EXPIRED → HELD` | Same reason, stated as a race. The moment a hold expires the slot is available to everyone; "un-expiring" it is a lock acquired without contending for it. |
+| `PENDING_PAYMENT → CANCELLED` | A charge is in flight and the outcome is unknown. Cancelling here would decide the booking's fate before the provider has decided the money's, and produce exactly the orphaned capture INV-5 forbids. The customer waits for `CONFIRMED` and then cancels, which refunds properly. |
+| `CONFIRMED → PENDING_PAYMENT` | There is no second charge. The idempotency key is derived from the booking id, so a booking has one charge for its whole life; re-entering payment would have nothing new to key. |
+| `COMPLETED → CANCELLED` | The room has been used. A refund after the fact is a credit note, which is a business process this system does not model — and modelling it badly is worse than not modelling it. |
+| `DRAFT → anything but HELD` | `DRAFT` exists only as the column default. No endpoint returns a booking in it; the hold transaction creates the row and moves it in one step. It is kept so that an unmigrated or hand-inserted row has a state that cannot be mistaken for a live one. |
+| `REFUNDED → *` | Terminal by definition. |
+
+### Why an illegal transition is a 409 and never a 500
+
+`transition()` locks the booking row `FOR UPDATE`, re-reads the status inside the
+lock, and rejects anything the table forbids with a `ConflictException` carrying
+the current state and the legal next states. Under concurrency an illegal
+transition is not a surprise — it is what losing a race looks like, and two
+clients cancelling the same booking is the normal case rather than a bug. A 500
+would say the machine was astonished; a 409 says the world moved first.
+
+`expectedFrom` is a second, narrower guard on the same call: the caller declares
+which state it read before deciding, and a mismatch fails rather than
+overwriting. That is what turns a lost update into a refusal.
 
 ---
 
@@ -413,6 +718,50 @@ It does not mark a payment REFUNDED merely because a refund id exists. Accepted
 is not settled, and assuming otherwise would model a provider that does not
 exist — the same mistake `payment-provider.ts` was written in P2 to avoid.
 
+### The ninth discrepancy class, and the reasoning error that produced it
+
+`charge_accepted_not_settled` was added in P8, and it is the most instructive
+thing this build turned up — not because the check is clever, but because of the
+sentence it replaced.
+
+The pull path asks the provider about charges it has not heard back on. When the
+provider answered **404 — never heard of it**, the poll treated that as *nothing
+was captured* and stopped worrying about the charge. There was a comment saying
+so, and the comment sounded reasonable. It is wrong, and the way it is wrong is
+worth being precise about:
+
+> **"The provider has no record of it" and "no money moved" are not the same
+> claim.** The first is a statement about the provider's memory. The second is a
+> statement about the world. Treating one as evidence of the other assumes the
+> provider's memory is complete — which is exactly the assumption a payment
+> integrity model exists to refuse.
+
+Paygate at the time kept its ledger **in memory**. A free-tier restart — every
+fifteen idle minutes — emptied it. So the provider genuinely did not remember
+charges it had genuinely captured, answered 404 to every poll about them, and the
+API read each 404 as "no money involved here". Money the platform had taken was
+invisible to the mechanism whose only job is to prove no money was lost, and
+**no reconciliation class disagreed**, because every existing class was framed as
+"a payment row says X while the provider says Y". A charge the provider had
+forgotten produced no Y at all, so it matched nothing.
+
+Two changes, and both were needed:
+
+1. **Paygate's ledger became durable** (`paygate_*` tables, its own migrations,
+   no shared connection with the API). A test double that forgets cannot
+   participate in a proof about money. This reversed a P3 decision that was
+   right about INV-3 and wrong about INV-5 — see DECISIONS.md 13.
+2. **`charge_accepted_not_settled`** now flags any `payments` row that has been
+   PENDING with a `charge_id` for longer than the grace period, regardless of
+   what the provider says or fails to say. It is framed on *our* state rather
+   than on the provider's answer, which is what makes it survive a provider that
+   answers nothing at all.
+
+The general lesson, and the reason it belongs in the payment model rather than in
+a changelog: **a reconciliation suite that only compares two sources cannot see a
+discrepancy that erases one of them.** At least one class has to be answerable
+from a single side of the boundary. That is now true, and it was not before.
+
 The provider half is built (P3, `apps/paygate/`). Full detail —
 env vars, the six chaos behaviours, how to force a scenario, a worked signature
 verification — is in `apps/paygate/README.md`. The declared deviations from the
@@ -654,9 +1003,133 @@ item. The fix is a schema change, not an index, and it is §8's first entry.
 
 ## 6. Stack Choice and Rejected Alternatives
 
-*Stub — P9. The brief requires the stack to be justified here against at least
-one rejected alternative, with an honest account of what the choice costs.
-Short entries live in `DECISIONS.md`; this section carries the argument.*
+One of these choices was forced by the correctness model and the rest were
+familiarity. The brief permits "it is what I know" if it is stated honestly
+alongside what it costs, so each entry below ends with the cost rather than the
+benefit.
+
+### PostgreSQL, over anything else — the one choice that was not preference
+
+**Rejected: MongoDB, and any document store.**
+
+The room invariant is `EXCLUDE USING gist (room_id WITH =, slot WITH &&)`. That
+is a *constraint*, not a query: the database refuses to hold two overlapping
+intervals for one room, whatever the application asks for, from whichever of
+three replicas asks. Nothing in a document store expresses it. The nearest
+equivalent is a unique index over discretised time slots, which forces two things
+this domain cannot accept — bookings snapped to a fixed grid, so a 90-minute
+booking occupies three 30-minute keys and the 15-minute turnaround becomes
+application arithmetic again; and a write per slot, so an 8-hour booking is
+sixteen index entries that must all succeed or all roll back.
+
+The alternative offered in practice is a transaction plus a read-check-write, and
+that is the exact race the brief is testing. Under 200 concurrent requests both
+racers read "free" and both write.
+
+Postgres also supplies, in the same box, the other three mechanisms this design
+leans on: `SELECT … FOR UPDATE` for the equipment lock, advisory locks for
+per-room hold serialisation, and window functions for the sweep line that
+computes peak concurrent equipment usage. Replacing it means replacing four
+things, not one.
+
+**Cost accepted:** operational weight. Postgres is the only stateful component
+and it is a single point of failure — the deployed instance has no replica, no
+failover and, on the free tier, a database that expires after 30 days. Scaling
+reads means adding infrastructure the brief's timeframe did not permit.
+
+### NestJS, over a thinner framework
+
+**Rejected: Fastify or Express with hand-rolled structure.**
+
+Fastify is faster and Paygate is built on it, which is the honest comparison —
+the provider needed six chaos behaviours, HMAC over raw bytes and nothing else,
+and a framework would have been in the way. The API needed the opposite: global
+guards that cannot be forgotten. `JwtAuthGuard`, `RolesGuard` and
+`VenueScopeGuard` are registered once and apply to every route, so a new
+controller is authenticated and tenant-scoped before its author writes a line.
+INV-6 is a hard cap on the score, and the failure mode that loses it is a route
+somebody forgot to protect. The route census in `tests/authz` enumerates every
+registered path and asserts none escapes — a check that only exists because the
+framework has a route registry to enumerate.
+
+**Cost accepted:** startup time, memory and indirection. Nest's DI container and
+decorator metadata cost real milliseconds on a 512 MB free-tier box, and the
+`emitDecoratorMetadata` dependency is what pins TypeScript below 7 (below).
+Reading a request's path through three guards, a pipe and an interceptor is
+genuinely harder than reading a Fastify handler.
+
+### Drizzle, over Prisma
+
+**Rejected: Prisma.**
+
+This is the choice where the correctness model and the ORM meet. **Prisma's
+schema language cannot express either of the two things this design depends on:**
+the GiST exclusion constraint, or the `tstzrange` generated column it operates
+over. Prisma has no range type and no generated-column support in its DSL, so
+both would have arrived as raw SQL inside `migrations/` — which is precisely the
+Drizzle arrangement, with a second schema language on top that does not know
+those objects exist. Prisma's introspection would then report drift against a
+database it cannot describe.
+
+Drizzle's `sql` template also lets the equipment sweep line be written as the
+window function it is, rather than pulled into application memory. Prisma's
+`$queryRaw` can do that too — at which point the ORM is being bypassed for the
+query that matters most.
+
+**Cost accepted:** a smaller ecosystem, thinner documentation, and sharper
+edges. Two of the defects in `AI_LOG.md` are Drizzle-specific and neither would
+exist in Prisma: a JS array interpolated into a `sql` template expands to one
+placeholder per element, and pg errors arrive nested under `cause` so a
+constraint violation returns 500 until something walks the chain. Prisma's
+generated client would also have caught the `jsonb`/`text` mistake at compile
+time that cost the entire payment path a phase.
+
+### TypeScript 6, over 7 — a deliberate downgrade
+
+**Rejected: TypeScript 7.**
+
+TypeScript 7 is the native-Go compiler and it is dramatically faster. It also
+does not implement `emitDecoratorMetadata`, and NestJS's dependency injection is
+built on it: without emitted parameter types, constructor injection resolves to
+`undefined` and every provider fails at boot. This is not a subtle degradation —
+it is a runtime failure on the first request.
+
+So the pin is 6.0.3, chosen with the newer compiler available and rejected. It is
+recorded here rather than in a lockfile comment because "why is this pinned
+back" is exactly the question a reviewer asks.
+
+**Cost accepted:** slower builds and typechecks for the life of the project, and
+a version that will fall out of support before the framework moves. The exit is
+Nest's own migration away from `reflect-metadata`, which is not on a timeline
+this project controls.
+
+### Next.js App Router, over a client-side SPA
+
+**Rejected: Vite + React SPA.**
+
+**The API sets no CORS headers.** A browser on the Vercel origin cannot call it
+at all — verified against the deployed instance, not assumed. A SPA therefore
+requires either adding CORS to the API or standing up a proxy, and the second is
+a Next server with extra steps.
+
+Given a server anyway, it earns its place: server components read, server actions
+write, and the access token lives in an httpOnly cookie that no client bundle can
+reach. An XSS in the console cannot exfiltrate a session. A SPA holding a bearer
+token in `localStorage` has the opposite property.
+
+**Cost accepted:** every interaction is a round trip to a free-tier server that
+sleeps after 15 idle minutes, so the console inherits the API's cold start on top
+of its own. One route handler exists as an explicit exception — the browser must
+poll the booking whose webhook has not landed — and that exception is the seam
+where this choice is least comfortable.
+
+### The honest summary
+
+Postgres was chosen for the invariants and would be chosen again by anyone
+solving this problem. Nest, Drizzle, Next and the TypeScript pin are familiarity,
+constrained by one real requirement each. If this were a greenfield decision with
+no clock, the one I would revisit is Nest: the guards are worth their weight, and
+almost nothing else is.
 
 ---
 
@@ -989,7 +1462,113 @@ sweeper only bounds how long a lapsed row sits there (§3, "Hold expiry").
 
 ## 9. What I'd Do With Two More Weeks
 
-*Stub — P9. In priority order.*
+Priority order, and the ordering is the argument: everything above the line is
+something this system currently gets away with rather than something it has
+solved. None of it is a feature.
+
+### 1. Make reconciliation incremental — INV-5 is the invariant with a clock on it
+
+**Why first:** it already takes 5.2 seconds at 250,000 bookings, and §8 shows why
+that degrades to unrunnable rather than slow. Every other invariant is enforced
+by a constraint that holds whether or not anyone is looking. INV-5 is the only
+one whose evidence is a query, and an invariant you cannot check is one you no
+longer know you have.
+
+The shape is in §8: index `payments (updated_at)` and
+`webhook_deliveries (received_at) WHERE processed_at IS NULL`, keep a
+"reconciled clean up to T" marker, and query only T→now. Cost becomes bounded by
+elapsed time rather than by platform lifetime. Two days, most of it on making the
+marker safe to advance under concurrent writers.
+
+### 2. Lift the per-room advisory lock's contention ceiling
+
+`pg_advisory_xact_lock(namespace, hashtext(room_id))` serialises holds per room
+and is the fix that took the P5 proof from 227 deadlocks to zero. It is also a
+hard serialisation point: every hold for one room queues, so a single popular
+room's throughput is one hold per transaction round trip no matter how many
+replicas are running.
+
+That is correct and it is a ceiling. `hashtext` also collides — two different
+rooms can share a lock key and serialise against each other for no reason, which
+is invisible until it is a latency mystery. Two weeks buys measuring where the
+ceiling actually is, then either partitioning the lock space to remove the
+collisions or replacing the lock with a retry budget tuned against real
+contention. I would not remove it without the measurement; the deadlock storm it
+fixed was real.
+
+### 3. Bound the equipment sweep line
+
+§8 measured it: the sweep has **two** available plans, both unbounded — a nested
+loop proportional to an equipment type's lifetime line items, and a hash join
+that scanned 54,589 bookings to find 162 — and the planner flips between them
+based on how many types a booking names. It runs inside the hold transaction
+while holding `SELECT … FOR UPDATE` on the equipment rows, so its cost surfaces
+as a throughput ceiling rather than as latency, which is the worse of the two.
+
+The fix is to stop asking about all of history: the query only needs bookings
+overlapping the requested window, so a composite index on
+`booking_line_items (equipment_type_id)` joined against a range-restricted
+`bookings (starts_at, ends_at)` predicate, and a hard time bound in the query
+itself. Measure before and after with the plans in §8 as the baseline.
+
+### 4. Three replicas in the deployed environment
+
+The correctness strategy's whole claim is that it holds across replicas, and the
+deployed instance runs **one**. The three-replica configuration is local only, so
+the property that matters most is demonstrated exactly where nobody external can
+see it. This is a hosting-tier problem rather than an engineering one, and it is
+high on the list because the gap between "proven locally" and "true in
+production" is precisely what a reviewer is entitled to be sceptical about.
+
+### 5. CI that runs the suites that matter
+
+CI runs 96 offline tests. `authz`, `proof` and `e2e` all need the compose stack,
+so **"CI green" currently means the unit tests pass** — while the concurrency
+proof, the tenant-isolation suite and the payment end-to-end are exactly the
+things a regression would break silently. GitHub Actions can run compose; the
+work is making the proof's timing assumptions stable on a shared runner, which is
+the reason it was not done under time pressure rather than a reason it cannot be.
+
+### 6. Orphaned charges after a re-seed
+
+The seed truncates the API's tables and registers its charges with Paygate's
+ledger. Re-seeding therefore leaves the *previous* run's charges in Paygate with
+no booking on this side — `capture_without_confirmation` discrepancies that are
+artefacts of re-seeding rather than lost money. Right now the answer is "re-seed
+Paygate too", which is a footnote in the README and not a mechanism. It wants a
+generation marker in the reference so a stale charge is identifiable rather than
+merely unmatched.
+
+---
+
+Below the line, the things that are visible rather than load-bearing:
+
+### 7. The Tier 3 features that were not built
+
+Recurring bookings, waitlists and dynamic pricing. Each is a real feature and
+none of them change whether the system is correct. Recurring bookings are the
+interesting one architecturally — N bookings that must succeed or fail as a unit
+turns the exclusion constraint from a per-row check into a transaction-wide one,
+and the naive implementation (insert them one at a time and roll back on the
+first 23P01) has a throughput problem the moment two recurring series overlap.
+
+### 8. Venue-facing depth in the console
+
+The revenue and utilisation report has an API and no page — one of the four
+endpoints `LOAD_TEST.md` benchmarks, so the loop is visibly open. Beyond it: a
+venue's own equipment and pricing screens, and a booking detail with the audit
+trail rendered, which is the one view that would make the state machine legible
+to somebody who has not read this document.
+
+### What I would not spend the two weeks on
+
+**Removing the 15-minute turnaround from the generated column.** It is
+occasionally suggested that the buffer should be configurable per venue. It
+should not be, until there is a customer asking: it currently lives inside
+`slot`, which means one rule in one place enforced by the constraint. Making it
+per-venue moves it into application code or into a per-row expression, and
+re-creates the class of bug where availability and admission disagree about what
+"free" means.
 
 ---
 
