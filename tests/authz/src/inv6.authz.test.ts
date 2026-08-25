@@ -550,14 +550,17 @@ describe('venue administration is scoped to the token venue', () => {
   });
 
   it('a CUSTOMER cannot reach venue administration at all', async () => {
-    for (const [method, path] of [
-      ['GET', '/venues/settings'],
-      ['PATCH', '/venues/settings'],
-      ['GET', '/venues/rooms'],
-      ['POST', '/venues/rooms'],
+    // A body only on the verbs that take one — `fetch` refuses a GET with one,
+    // and the failure looks like a test bug rather than an authorisation
+    // result, which is exactly what it was the first time this ran.
+    for (const [method, path, body] of [
+      ['GET', '/venues/settings', undefined],
+      ['PATCH', '/venues/settings', { overbooking_buffer_pct: 0 }],
+      ['GET', '/venues/rooms', undefined],
+      ['POST', '/venues/rooms', { name: 'customer room', capacity: 2, hourly_rate_minor: '100' }],
     ] as const) {
-      const probe = await call(method, path, world.a.customer, { overbooking_buffer_pct: 0 });
-      expect([403, 404]).toContain(probe.status);
+      const probe = await call(method, path, world.a.customer, body);
+      expect([403, 404], `${method} ${path}`).toContain(probe.status);
     }
   });
 });

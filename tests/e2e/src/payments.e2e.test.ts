@@ -372,7 +372,21 @@ describe('INV-4: payment succeeds against a hold that has already expired', () =
     );
 
     // Exactly one transition wrote the expiry — not zero, not two.
-    const expiries = events.rows.filter((r) => r.to_state === 'EXPIRED');
+    //
+    // `from_state !== 'EXPIRED'` is load bearing, and its absence made this
+    // assertion a coin flip. A settled refund against an already-terminal
+    // booking writes `EXPIRED -> EXPIRED` with reason
+    // `refund.settled.terminal_booking`, which is a deliberate record of the
+    // money moving and not a second expiry. Whether that row exists by the time
+    // this test runs depends entirely on whether Paygate's own
+    // `refund.succeeded` delivery has landed yet — chaos is on, so usually it
+    // has not, and occasionally it has. P8 caught it having.
+    //
+    // The question being asked is "how many times did this booking BECOME
+    // expired", so a self-transition is not one of them.
+    const expiries = events.rows.filter(
+      (r) => r.to_state === 'EXPIRED' && r.from_state !== 'EXPIRED',
+    );
     expect(expiries).toHaveLength(1);
     expect(expiries[0]!.from_state).toBe('PENDING_PAYMENT');
   });

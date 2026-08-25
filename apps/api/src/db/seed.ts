@@ -538,26 +538,35 @@ async function seedVenuePolicies(
  * that should be on the row.
  */
 async function seedPolicySnapshots(client: PoolClient): Promise<number> {
+  // `src` is the same table again, and it has to be.
+  //
+  // A LATERAL in an UPDATE ... FROM may only reference tables in the FROM
+  // clause, and the UPDATE target is not one of them — Postgres answers
+  // "invalid reference to FROM-clause entry for table b". Joining `bookings`
+  // back in under another name gives the lateral something it is allowed to
+  // correlate with, and `src.id = b.id` keeps it to one row per booking.
   const updated = await client.query(`
     UPDATE bookings b
        SET policy_snapshot = jsonb_build_object(
              'tiers', p.tiers,
              'policy_id', p.id,
              'resolved_from', CASE WHEN p.venue_id IS NULL THEN 'platform' ELSE 'venue' END,
-             'snapshot_at', to_char(b.created_at AT TIME ZONE 'UTC',
+             'snapshot_at', to_char(src.created_at AT TIME ZONE 'UTC',
                                     'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
            )
-      FROM LATERAL (
+      FROM bookings src
+      JOIN LATERAL (
         SELECT cp.id, cp.tiers, cp.venue_id
           FROM cancellation_policies cp
-         WHERE (cp.venue_id = b.venue_id OR cp.venue_id IS NULL)
-           AND cp.created_at <= b.created_at
+         WHERE (cp.venue_id = src.venue_id OR cp.venue_id IS NULL)
+           AND cp.created_at <= src.created_at
          -- A venue's own policy beats the platform default; among those, the
          -- newest that already existed wins. Same precedence as resolveTiers.
          ORDER BY (cp.venue_id IS NOT NULL) DESC, cp.created_at DESC
          LIMIT 1
-      ) p
-     WHERE b.status IN ('CONFIRMED','COMPLETED','CANCELLED','REFUNDED')
+      ) p ON true
+     WHERE src.id = b.id
+       AND b.status IN ('CONFIRMED','COMPLETED','CANCELLED','REFUNDED')
   `);
 
   return updated.rowCount ?? 0;
