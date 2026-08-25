@@ -14,9 +14,21 @@ import { loadConfig } from './config.js';
  * scenario, and a worked signature verification.
  */
 const cfg = loadConfig();
-const { app } = buildApp(cfg);
+const { app, ledger } = buildApp(cfg);
 
 async function main(): Promise<void> {
+  /**
+   * Migrations before the port opens, not after.
+   *
+   * Paygate is a single instance on every target it runs on, so there is no
+   * replica race to arrange around — but a charge accepted against tables that
+   * do not exist yet is a 500 the caller reads as a chaos branch, which is the
+   * worst possible way to fail. The runner takes an advisory lock anyway, so a
+   * seed racing a cold start cannot apply the same file twice.
+   */
+  await ledger.init();
+  app.log.info({ store: ledger.kind }, 'paygate.ledger.ready');
+
   // Bind :: rather than 0.0.0.0. Docker's DNS hands out AAAA records, so an
   // IPv4-only bind produced intermittent 502s through nginx in P1.
   //

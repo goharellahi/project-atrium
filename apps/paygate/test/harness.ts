@@ -86,6 +86,13 @@ export function testConfig(overrides: Partial<PaygateConfig> = {}): PaygateConfi
     testEndpoints: true,
     declineAmountMinor: 666,
     deliveryTimeoutMs: 5000,
+    // The unit suites run against the in-memory ledger deliberately. They
+    // assert the idempotency contract and the chaos rates, neither of which
+    // durability affects, and a database would cost them the sub-second
+    // feedback that makes them worth running at all. Durability is asserted in
+    // `tests/e2e/src/provider-restart.e2e.test.ts`, against the real ledger.
+    store: 'memory',
+    databaseUrl: null,
     logLevel: 'silent',
     ...overrides,
   };
@@ -102,6 +109,7 @@ export async function startHarness(overrides: Partial<PaygateConfig> = {}): Prom
   const receiver = new Receiver();
   await receiver.start();
   const built = buildApp(testConfig({ callbackUrl: receiver.url, ...overrides }));
+  await built.ledger.init();
   return {
     ...built,
     receiver,

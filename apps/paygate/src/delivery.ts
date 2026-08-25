@@ -3,7 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { PaygateConfig } from './config.js';
 import { corruptSignatureFor } from './chaos.js';
 import { corrupt, sign } from './signature.js';
-import type { Store } from './store.js';
+import type { Ledger } from './ledger/index.js';
 import type { DeliveryRecord, WebhookBody, WebhookEvent } from './types.js';
 
 export interface DeliveryRequest {
@@ -46,12 +46,12 @@ export class Deliverer {
   constructor(
     private readonly cfg: PaygateConfig,
     private readonly log: FastifyBaseLogger,
-    private readonly store: Store,
+    private readonly ledger: Ledger,
   ) {}
 
   /** Deliver now, awaited. Used by the race-on-response branch and /_test/deliver. */
   async deliver(req: DeliveryRequest): Promise<DeliveryRecord> {
-    const attempt = this.store.nextAttempt(req.chargeId);
+    const attempt = await this.ledger.nextAttempt(req.chargeId);
     const deliveryId = randomUUID();
     const signatureCorrupted =
       req.forceCorruptSignature ?? corruptSignatureFor(req.idempotencyKey, attempt, this.cfg);
@@ -86,10 +86,15 @@ export class Deliverer {
       error: null,
       correlation_id: req.correlationId,
     };
-    this.store.recordDelivery(req.chargeId, record);
+    // Written before the call goes out, so an attempt that times out — or that
+    // this process dies half way through — still leaves a row. A silent drop
+    // inside the provider is indistinguishable from a bug in the API, and this
+    // row is where a reviewer settles that argument.
+    await this.ledger.recordDelivery(record);
 
     if (!this.cfg.callbackUrl) {
       record.error = 'no callback url configured (PAYGATE_CALLBACK_URL / PAYGATE_WEBHOOK_URL)';
+      await this.ledger.finishDelivery(record);
       this.log.error({ delivery: record }, 'paygate.delivery.skipped');
       return record;
     }
@@ -119,6 +124,8 @@ export class Deliverer {
       record.error = err instanceof Error ? err.message : String(err);
       record.duration_ms = Date.now() - startedAt;
     }
+
+    await this.ledger.finishDelivery(record);
 
     this.log.info(
       {

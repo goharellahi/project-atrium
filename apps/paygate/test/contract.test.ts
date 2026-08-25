@@ -67,7 +67,7 @@ describe('POST /paygate/charges', () => {
     expect(second.json<{ charge_id: string }>().charge_id).toBe(
       first.json<{ charge_id: string }>().charge_id,
     );
-    expect(h.store.charges.size).toBe(1);
+    expect((await h.ledger.counts()).charges).toBe(1);
 
     await h.settle();
     expect(h.receiver.received).toHaveLength(1);
@@ -89,7 +89,7 @@ describe('POST /paygate/charges', () => {
     });
     expect(res.statusCode).toBe(409);
     expect(res.json<{ error: { code: string } }>().error.code).toBe('idempotency_key_reuse');
-    expect(h.store.charges.size).toBe(1);
+    expect((await h.ledger.counts()).charges).toBe(1);
   });
 
   it('requires an Idempotency-Key and a valid body', async () => {
@@ -103,7 +103,7 @@ describe('POST /paygate/charges', () => {
       payload: { amount_minor: -1, currency: 'pkr', reference: '' },
     });
     expect(bad.statusCode).toBe(422);
-    expect(h.store.charges.size).toBe(0);
+    expect((await h.ledger.counts()).charges).toBe(0);
   });
 
   it('declines deterministically at the configured amount', async () => {
@@ -158,9 +158,12 @@ describe('the 10% transient failure', () => {
       expect(retry.statusCode).toBe(202);
 
       // Exactly one charge exists, and it is the one the 500 minted.
-      expect(h.store.charges.size).toBe(1);
-      const only = [...h.store.charges.values()][0]!;
-      expect(retry.json<{ charge_id: string }>().charge_id).toBe(only.id);
+      expect((await h.ledger.counts()).charges).toBe(1);
+      // Read it back by the id the retry returned, rather than by rummaging in
+      // the store: the assertion is that the retry resolved to a charge that
+      // exists, which is the whole contract.
+      const retriedId = retry.json<{ charge_id: string }>().charge_id;
+      expect(await h.ledger.getCharge(retriedId)).not.toBeNull();
 
       // A third attempt still does not create a second charge.
       await h.app.inject({
@@ -169,7 +172,7 @@ describe('the 10% transient failure', () => {
         headers: { 'idempotency-key': key },
         payload: CHARGE,
       });
-      expect(h.store.charges.size).toBe(1);
+      expect((await h.ledger.counts()).charges).toBe(1);
     } finally {
       await h.stop();
     }
@@ -236,8 +239,8 @@ describe('POST /paygate/refunds', () => {
       payload,
     });
     expect(b.json<{ refund_id: string }>().refund_id).toBe(a.json<{ refund_id: string }>().refund_id);
-    expect(h.store.refunds.size).toBe(1);
-    expect(h.store.charges.get(chargeId)!.refunded_minor).toBe(22_500);
+    expect((await h.ledger.counts()).refunds).toBe(1);
+    expect((await h.ledger.getCharge(chargeId))!.refunded_minor).toBe(22_500);
 
     await h.settle();
     expect(h.receiver.received).toHaveLength(1);

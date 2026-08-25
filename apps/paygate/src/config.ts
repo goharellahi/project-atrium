@@ -64,6 +64,33 @@ const EnvSchema = z.object({
   /** Per-delivery HTTP timeout. */
   PAYGATE_DELIVERY_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
 
+  /**
+   * Where Paygate's ledger lives.
+   *
+   * `postgres` is the default and the design. `memory` exists for the unit
+   * suites, which assert the idempotency contract and the chaos rates and buy
+   * nothing from durability.
+   *
+   * The default used to be the only option, and that was the defect: Render's
+   * free tier sleeps after fifteen idle minutes, so an in-memory provider forgets
+   * every charge it ever captured and answers `404 unknown_charge` to the refund
+   * that follows. INV-5 cannot be demonstrated against a provider with amnesia.
+   * See `ledger/ledger.ts`.
+   */
+  PAYGATE_STORE: z.enum(['postgres', 'memory']).default('postgres'),
+
+  /**
+   * Paygate's own connection string.
+   *
+   * Named separately from the API's `DATABASE_URL` on purpose. The two services
+   * share one Postgres instance because the free tier gives one, and that is a
+   * hosting constraint rather than a design one — Paygate's tables are its own,
+   * its migrations are its own, and pointing this at a different instance is the
+   * whole of what separating them takes. A single shared variable would have
+   * made that separation invisible and, in time, untrue.
+   */
+  PAYGATE_DATABASE_URL: z.string().min(1).optional(),
+
   LOG_LEVEL: z.string().default('info'),
 });
 
@@ -81,6 +108,9 @@ export type PaygateConfig = {
   testEndpoints: boolean;
   declineAmountMinor: number;
   deliveryTimeoutMs: number;
+  store: 'postgres' | 'memory';
+  /** Non-null whenever `store` is `postgres`; `loadConfig` refuses otherwise. */
+  databaseUrl: string | null;
   logLevel: string;
 };
 
@@ -93,6 +123,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PaygateConfig 
     throw new Error(`Invalid Paygate environment — ${detail}`);
   }
   const e = parsed.data;
+
+  /**
+   * Refused, not defaulted.
+   *
+   * Falling back to memory when the URL is missing is how a deployment ends up
+   * running the amnesiac provider without anybody choosing it — which is the
+   * exact failure this configuration exists to prevent. Choosing memory has to
+   * be a decision somebody typed.
+   */
+  if (e.PAYGATE_STORE === 'postgres' && !e.PAYGATE_DATABASE_URL) {
+    throw new Error(
+      'Invalid Paygate environment — PAYGATE_STORE=postgres requires PAYGATE_DATABASE_URL. ' +
+        'Set it, or set PAYGATE_STORE=memory to run without a durable ledger (unit tests only: ' +
+        'an in-memory provider forgets every charge on restart and cannot support INV-5).',
+    );
+  }
+
   const production = e.NODE_ENV === 'production';
   const testEndpointsRequested = e.PAYGATE_TEST_ENDPOINTS === 'on';
   return {
@@ -106,6 +153,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): PaygateConfig 
     testEndpoints: testEndpointsRequested && !production,
     declineAmountMinor: e.PAYGATE_DECLINE_AMOUNT_MINOR,
     deliveryTimeoutMs: e.PAYGATE_DELIVERY_TIMEOUT_MS,
+    store: e.PAYGATE_STORE,
+    databaseUrl: e.PAYGATE_DATABASE_URL ?? null,
     logLevel: e.LOG_LEVEL,
   };
 }
