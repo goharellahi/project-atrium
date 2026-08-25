@@ -32,8 +32,8 @@ export const SEARCH_COLUMNS = [
   { label: 'City', width: '12%' },
   { label: 'Capacity', width: '9%', numeric: true },
   { label: 'Rate / hr', width: '11%', numeric: true },
-  { label: 'Amenities', width: '18%' },
-  { label: '', width: '6%' },
+  { label: 'Amenities', width: '16%' },
+  { label: '', width: '9%' },
 ];
 
 export async function SearchResults({
