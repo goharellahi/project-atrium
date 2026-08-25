@@ -268,21 +268,35 @@ export function CheckoutClient({
               </p>
               <dl className="mt-2 flex flex-col gap-1">
                 <PairInline label="Charge" value={payState.payment.charge_id ?? '—'} />
-                <PairInline label="Payment" value={payState.payment.status} />
+                <PairInline label="Accepted as" value={payState.payment.status} />
                 <PairInline label="Key" value={payState.payment.idempotency_key} />
+                {/*
+                  The settled row, beside the acceptance receipt rather than
+                  instead of it. `GET /bookings/:id` now carries the payment the
+                  reconciler reads, and this screen already polls that endpoint,
+                  so both states are visible and both are labelled.
+                */}
+                <PairInline
+                  label="Settled as"
+                  value={booking.payment?.status ?? 'not settled yet'}
+                />
               </dl>
               {/*
-                This is what the provider said when it accepted the charge, and
-                it is not refreshed afterwards — which is why a CONFIRMED
-                booking can show a PENDING payment here. That is not a
-                contradiction, it is the whole shape of the system: the charge
-                is accepted first and the webhook settles it second. Quietly
-                re-reading the payment to make the two agree would hide the one
-                thing this screen exists to show.
+                Two lines, and the difference between them is the point.
+                "Accepted as" is what the provider said when it took the charge,
+                and it never changes. "Settled as" is the payments row, which the
+                webhook advances and which the reconciliation report reads.
+
+                P7 showed only the first, so a CONFIRMED booking sat beside a
+                payment reading PENDING and looked like a contradiction. It was
+                not one — payments.status is genuinely advanced on capture — but
+                a screen that can be read as one is a defect whatever the
+                database says.
               */}
               <p className="mt-2 text-xs text-ink-muted">
-                As the provider answered when the charge was accepted. The webhook
-                settles it afterwards, which is what moves the booking.
+                Accepted first, settled second. The gap between these two lines is the
+                webhook in flight — which for one delivery in twenty this provider parks
+                deliberately for a minute or more.
               </p>
             </div>
           ) : null}
