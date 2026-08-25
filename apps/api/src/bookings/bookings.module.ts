@@ -5,6 +5,7 @@ import { BookingStateMachine } from './booking-state-machine.service';
 import { HoldSweeper } from './hold-sweeper.service';
 import { AvailabilityService } from '../rooms/availability.service';
 import { RoomsController } from '../rooms/rooms.controller';
+import { RoomsService } from '../rooms/rooms.service';
 import { SearchController } from '../search/search.controller';
 import { SearchService } from '../search/search.service';
 import { StateMachineModule } from './state-machine.module';
@@ -32,6 +33,11 @@ import type { Env } from '../config/env';
       provide: AvailabilityService,
       inject: [DB, ENV_TOKEN],
       useFactory: (db: Db, env: Env) => new AvailabilityService(db, env),
+    },
+    {
+      provide: RoomsService,
+      inject: [DB],
+      useFactory: (db: Db) => new RoomsService(db),
     },
     {
       provide: SearchService,
