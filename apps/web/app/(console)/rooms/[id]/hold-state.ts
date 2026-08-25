@@ -26,18 +26,3 @@ export const EMPTY_HOLD_STATE: HoldState = {
   issues: [],
   detail: {},
 };
-
-/**
- * Whether the equipment catalogue is readable from this screen, and why not.
- *
- * `unreadable` covers both a 403 and an API that did not answer: from the
- * booking panel's point of view they are the same fact — there is no catalogue
- * to show — and it offers the manual id field either way rather than dropping
- * equipment from the flow because one request failed.
- *
- * `other_venue` is separate because collapsing it into an empty picker would
- * tell a venue admin looking at another venue's room that the venue owns no
- * equipment. It owns plenty; this account cannot see it, which is tenant
- * isolation working rather than an empty inventory.
- */
-export type EquipmentAccess = 'available' | 'unreadable' | 'other_venue';

@@ -8,41 +8,41 @@ import { Callout, IssueList } from '@/components/ui/callout';
 import { Input, Label } from '@/components/ui/input';
 import { Select } from '@/components/ui/select';
 import { PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel';
-import { amount, dayIn, timeIn } from '@/lib/format';
-import type { EquipmentType, FreeSlot } from '@/lib/types';
-import type { EquipmentAccess } from './hold-state';
+import { amount, dayIn, timeIn, zoneLabel } from '@/lib/format';
+import type { EquipmentShortfall, EquipmentType, FreeSlot } from '@/lib/types';
 
 /**
  * The right-hand column: what is selected, what it will cost, and the one
  * primary action on this screen.
  *
- * ## The equipment problem, stated rather than hidden
+ * ## The equipment problem, now solved rather than stated
  *
- * `GET /equipment-types` is gated to VENUE_ADMIN, VENUE_STAFF and
- * PLATFORM_ADMIN — verified against the deployed API, which answers a CUSTOMER
- * token with 403 "Insufficient role". `POST /bookings/hold` accepts line items
- * from anyone. So a customer can book equipment but cannot discover it.
+ * P7 shipped this panel with a field for pasting an equipment type UUID and a
+ * sentence explaining that `GET /equipment-types` answers a customer 403. That
+ * was honest and useless: a customer has no way to obtain a UUID, so "hold, pay
+ * and confirm with equipment line items" — a Tier 1 requirement — could not be
+ * exercised through the UI by the only role that books.
  *
- * That is an API gap, not a UI one, and this panel does not paper over it. Staff
- * get a picker off the real inventory. Everyone else gets a field for an
- * equipment type id and a sentence saying why there is no list — which is
- * honest, usable by a reviewer with an id in hand, and leaves the gap visible
- * instead of quietly dropping half a requirement. The fix is a
- * customer-readable catalogue endpoint; it is an `apps/api` change and is
- * recorded in PLAN.md.
+ * `GET /rooms/:id/equipment-types` is the customer-readable catalogue, scoped
+ * to the room's venue by the API rather than filtered here. Every role now gets
+ * the same picker, showing name, hourly rate and how many the venue owns, and
+ * the three access branches are gone with the field they existed to explain.
  *
- * `other_venue` is the third case and it exists because collapsing it into an
- * empty picker tells a venue admin looking at another venue's room that the
- * venue owns no equipment. It owns plenty. This account simply cannot see it,
- * which is INV-6 working, not an empty inventory.
+ * ## The 409 is the API's sentence, not a paraphrase
+ *
+ * When equipment is oversold the hold path returns a 409 naming what was asked
+ * for, what was already reserved at peak, and the ceiling the venue's fleet and
+ * buffer produce. "Not available" is not something a customer can act on;
+ * "2 of 3 already reserved at peak, short by 1" is — they can drop a camera or
+ * pick another hour. So the shortfalls are rendered as the API computed them.
  */
 
 export interface LineItemDraft {
   equipment_type_id: string;
   quantity: number;
-  /** Present only when the picker knew the name. Never sent to the API. */
-  name?: string;
-  rate_minor?: string;
+  /** Local to the picker. Never sent to the API, which prices from its own rows. */
+  name: string;
+  rate_minor: string;
 }
 
 export function BookingPanel({
@@ -51,18 +51,14 @@ export function BookingPanel({
   timezone,
   hourlyRateMinor,
   equipment,
-  equipmentAccess,
 }: {
   roomId: string;
   slot: FreeSlot | null;
   timezone: string;
   hourlyRateMinor: string | null;
   equipment: EquipmentType[];
-  equipmentAccess: EquipmentAccess;
 }) {
   const [items, setItems] = useState<LineItemDraft[]>([]);
-  const [manualId, setManualId] = useState('');
-  const [manualQuantity, setManualQuantity] = useState('1');
   const [state, action, pending] = useActionState(createHold, EMPTY_HOLD_STATE);
 
   const hours = slot
@@ -83,7 +79,6 @@ export function BookingPanel({
     const halfHours = BigInt(Math.round(hours * 2));
     let total = (halfHours * BigInt(hourlyRateMinor)) / 2n;
     for (const item of items) {
-      if (!item.rate_minor) return null; // An unknown rate makes the estimate a lie.
       total += (halfHours * BigInt(item.rate_minor) * BigInt(item.quantity)) / 2n;
     }
     return total;
@@ -138,7 +133,9 @@ export function BookingPanel({
               {dayIn(slot.starts_at, timezone)} · {timeIn(slot.starts_at, timezone)}–
               {timeIn(slot.ends_at, timezone)}
             </span>
-            <span className="text-xs text-ink-muted">Venue local time ({timezone})</span>
+            <span className="text-xs text-ink-muted">
+              Venue local time · {timezone} ({zoneLabel(slot.starts_at, timezone)})
+            </span>
           </div>
         ) : (
           <p className="text-sm text-ink-muted">
@@ -152,65 +149,13 @@ export function BookingPanel({
             <span className="text-xs text-ink-muted">Optional</span>
           </div>
 
-          {equipmentAccess === 'unreadable' ? (
-            <p className="text-sm text-ink-muted">
-              This API exposes the equipment catalogue to venue staff only — a customer
-              token gets 403. Enter a type id directly if you have one; the hold path
-              accepts line items from any signed-in user.
-            </p>
-          ) : equipmentAccess === 'other_venue' ? (
-            <p className="text-sm text-ink-muted">
-              This room belongs to a different venue from the one on your token, so its
-              equipment is not yours to list. That is the tenant boundary holding, not an
-              empty inventory. A type id entered directly still works.
-            </p>
-          ) : equipment.length === 0 ? (
+          {equipment.length === 0 ? (
             <p className="text-sm text-ink-muted">
               This venue has no equipment types on record.
             </p>
           ) : (
             <EquipmentPicker equipment={equipment} onAdd={addItem} />
           )}
-
-          {equipmentAccess !== 'available' ? (
-            <div className="flex items-end gap-2">
-              <div className="flex-1">
-                <Label htmlFor="manual-equipment">Equipment type id</Label>
-                <Input
-                  id="manual-equipment"
-                  value={manualId}
-                  onChange={(event) => setManualId(event.target.value)}
-                  placeholder="00000000-0000-0000-0000-000000000000"
-                  className="mt-1 font-mono text-data"
-                />
-              </div>
-              <div className="w-[72px]">
-                <Label htmlFor="manual-quantity">Qty</Label>
-                <Input
-                  id="manual-quantity"
-                  type="number"
-                  min={1}
-                  value={manualQuantity}
-                  onChange={(event) => setManualQuantity(event.target.value)}
-                  className="mt-1 font-mono text-data"
-                />
-              </div>
-              <Button
-                type="button"
-                disabled={manualId.trim().length < 8}
-                onClick={() => {
-                  addItem({
-                    equipment_type_id: manualId.trim(),
-                    quantity: Math.max(1, Number(manualQuantity) || 1),
-                  });
-                  setManualId('');
-                  setManualQuantity('1');
-                }}
-              >
-                Add
-              </Button>
-            </div>
-          ) : null}
 
           {items.length > 0 ? (
             <ul className="flex flex-col divide-y divide-line rounded border border-line">
@@ -219,12 +164,12 @@ export function BookingPanel({
                   key={item.equipment_type_id}
                   className="flex items-center gap-3 px-3 py-2"
                 >
-                  <span className="flex-1 truncate text-sm text-ink">
-                    {item.name ?? (
-                      <code className="font-mono text-data">{item.equipment_type_id}</code>
-                    )}
+                  <span className="min-w-0 flex-1 truncate text-sm text-ink">
+                    {item.name}
                   </span>
-                  <span className="font-mono text-data text-ink-muted">×{item.quantity}</span>
+                  <span className="shrink-0 font-mono text-data text-ink-muted">
+                    ×{item.quantity} · {amount(item.rate_minor)}/h
+                  </span>
                   <Button
                     type="button"
                     size="sm"
@@ -257,15 +202,7 @@ export function BookingPanel({
         </p>
 
         {state.status === 'conflict' ? (
-          <Callout tone="info" title={state.message ?? 'That slot is no longer free.'}>
-            Somebody else holds it now. Under concurrent load this is the expected answer
-            for every request but the first — refresh the slots and pick another.
-            {typeof state.detail.reason === 'string' ? (
-              <span className="mt-1 block font-mono text-xs">
-                reason: {state.detail.reason}
-              </span>
-            ) : null}
-          </Callout>
+          <ConflictCallout state={state} />
         ) : null}
 
         {state.status === 'invalid' ? (
@@ -298,6 +235,78 @@ export function BookingPanel({
   );
 }
 
+/**
+ * A 409 from the hold path, told apart into its two causes.
+ *
+ * The room and the equipment both answer 409 and they mean opposite things. The
+ * room's is "somebody else took this slot" — a lost race, expected under
+ * concurrency, and the fix is to pick another time. Equipment's is "the venue
+ * does not have that many at once in this window" — nobody took anything, and
+ * the fix is to ask for fewer. Collapsing them into "that slot is no longer
+ * free" sends a customer hunting for another hour when the hour was never the
+ * problem.
+ *
+ * The API distinguishes them by attaching `shortfalls`, so the console does
+ * too, and prints the numbers the API computed rather than inventing a summary
+ * of them.
+ */
+function ConflictCallout({
+  state,
+}: {
+  state: { message: string | null; detail: Record<string, unknown> };
+}) {
+  const shortfalls = Array.isArray(state.detail.shortfalls)
+    ? (state.detail.shortfalls as EquipmentShortfall[])
+    : [];
+
+  if (shortfalls.length > 0) {
+    return (
+      <Callout tone="info" title="Not enough equipment free in this window.">
+        <ul className="flex flex-col gap-2">
+          {shortfalls.map((shortfall) => (
+            <li key={shortfall.equipment_type_id} className="flex flex-col gap-0.5">
+              <span className="text-ink">{shortfall.name}</span>
+              <span className="font-mono text-xs">
+                asked {shortfall.requested} · {shortfall.peak_in_use} already reserved at
+                peak · ceiling {shortfall.ceiling} · short by {shortfall.short_by}
+              </span>
+            </li>
+          ))}
+        </ul>
+        <p className="mt-2">
+          The ceiling is what the venue owns, plus its overbooking buffer if it has
+          one, rounded down. Peak is the most that are out at once at any instant
+          inside this window — not a total over it, which is why a busy day does not
+          block a booking on its own.
+        </p>
+      </Callout>
+    );
+  }
+
+  return (
+    <Callout tone="info" title={state.message ?? 'That slot is no longer free.'}>
+      Somebody else holds it now. Under concurrent load this is the expected answer
+      for every request but the first — refresh the slots and pick another.
+      {typeof state.detail.reason === 'string' ? (
+        <span className="mt-1 block font-mono text-xs">
+          reason: {state.detail.reason}
+        </span>
+      ) : null}
+    </Callout>
+  );
+}
+
+/**
+ * Name, rate and a quantity control — the three things a booker needs.
+ *
+ * `units_owned` is shown too, because it is the number the 409's ceiling is
+ * derived from: seeing "3 owned" before asking for four makes the refusal
+ * predictable rather than surprising. What is deliberately NOT shown is how
+ * many are out right now. That is a live figure about the venue's other
+ * customers, the API does not publish it, and it would be stale by the time it
+ * was read anyway — the hold path answers that question inside the lock, which
+ * is the only place the answer cannot go out of date.
+ */
 function EquipmentPicker({
   equipment,
   onAdd,
@@ -308,50 +317,62 @@ function EquipmentPicker({
   const [selected, setSelected] = useState(equipment[0]?.id ?? '');
   const [quantity, setQuantity] = useState('1');
 
+  const type = equipment.find((candidate) => candidate.id === selected);
+
   return (
-    <div className="flex items-end gap-2">
-      <div className="min-w-0 flex-1">
-        <Label htmlFor="equipment-type">Type</Label>
-        <div className="mt-1">
-          <Select
-            ariaLabel="Equipment type"
-            value={selected}
-            options={equipment.map((type) => ({
-              value: type.id,
-              label: `${type.name} — ${type.units_owned} owned`,
-            }))}
-            onValueChange={setSelected}
+    <div className="flex flex-col gap-2">
+      <div className="flex items-end gap-2">
+        <div className="min-w-0 flex-1">
+          <Label htmlFor="equipment-type">Type</Label>
+          <div className="mt-1">
+            <Select
+              ariaLabel="Equipment type"
+              value={selected}
+              options={equipment.map((candidate) => ({
+                value: candidate.id,
+                label: `${candidate.name} — ${amount(candidate.hourly_rate_minor)}/h · ${candidate.units_owned} owned`,
+              }))}
+              onValueChange={setSelected}
+            />
+          </div>
+        </div>
+        <div className="w-[72px]">
+          <Label htmlFor="equipment-quantity">Qty</Label>
+          <Input
+            id="equipment-quantity"
+            type="number"
+            min={1}
+            max={type?.units_owned ?? 1000}
+            value={quantity}
+            onChange={(event) => setQuantity(event.target.value)}
+            className="mt-1 font-mono text-data"
           />
         </div>
+        <Button
+          type="button"
+          disabled={!type}
+          onClick={() => {
+            if (!type) return;
+            onAdd({
+              equipment_type_id: type.id,
+              quantity: Math.max(1, Number(quantity) || 1),
+              name: type.name,
+              rate_minor: type.hourly_rate_minor,
+            });
+            setQuantity('1');
+          }}
+        >
+          Add
+        </Button>
       </div>
-      <div className="w-[72px]">
-        <Label htmlFor="equipment-quantity">Qty</Label>
-        <Input
-          id="equipment-quantity"
-          type="number"
-          min={1}
-          value={quantity}
-          onChange={(event) => setQuantity(event.target.value)}
-          className="mt-1 font-mono text-data"
-        />
-      </div>
-      <Button
-        type="button"
-        disabled={!selected}
-        onClick={() => {
-          const type = equipment.find((candidate) => candidate.id === selected);
-          if (!type) return;
-          onAdd({
-            equipment_type_id: type.id,
-            quantity: Math.max(1, Number(quantity) || 1),
-            name: type.name,
-            rate_minor: type.hourly_rate_minor,
-          });
-          setQuantity('1');
-        }}
-      >
-        Add
-      </Button>
+
+      {type ? (
+        <p className="text-xs text-ink-muted">
+          {type.name}: {amount(type.hourly_rate_minor)} per hour, {type.units_owned}{' '}
+          owned by this venue. Whether that many are free in your window is decided when
+          you hold, not now.
+        </p>
+      ) : null}
     </div>
   );
 }

@@ -5,9 +5,8 @@ import { Button } from '@/components/ui/button';
 import { Callout } from '@/components/ui/callout';
 import { Panel, PanelBody } from '@/components/ui/panel';
 import { api, ApiError, ApiUnreachableError, qs } from '@/lib/api';
-import { amount, shortId } from '@/lib/format';
-import type { Availability, EquipmentType } from '@/lib/types';
-import type { EquipmentAccess } from './hold-state';
+import { amount, zoneLabel } from '@/lib/format';
+import type { Availability, EquipmentType, Room } from '@/lib/types';
 import { RoomWorkspace } from './workspace';
 
 export const metadata: Metadata = { title: 'Room · Atrium' };
@@ -15,19 +14,23 @@ export const metadata: Metadata = { title: 'Room · Atrium' };
 /**
  * One room, its availability, and the panel that turns a slot into a hold.
  *
- * ## Why the room's name arrives in the querystring
+ * ## What changed in P8
  *
- * There is no `GET /rooms/:id`. The catalogue is published by `/search`, which
- * filters by city, capacity, amenity and price but not by id, so a room's name,
- * venue and rate cannot be fetched for a room already chosen. The options were
- * to page through the whole catalogue looking for one id, or to carry the four
- * fields the header shows on the link that got here.
+ * Both of this screen's workarounds are gone, because both endpoints now exist.
  *
- * The link carries them, and the page works without them: a deep link with no
- * parameters shows the room by id and everything except the header is
- * unaffected, because availability, holds and pricing all come from the API.
- * The missing endpoint is recorded in PLAN.md rather than worked around
- * silently.
+ * The room's name, venue, city and rate used to arrive in the querystring,
+ * carried on the link that navigated here, because `/search` cannot filter by
+ * id and there was no `GET /rooms/:id`. A pasted or shared URL therefore
+ * rendered a bare UUID. It now loads the room.
+ *
+ * Equipment used to be staff-only — `GET /equipment-types` answers a customer
+ * 403 — so the only role that books was given a field to paste a UUID into and
+ * a sentence explaining why there was no list. `GET /rooms/:id/equipment-types`
+ * is the customer-readable catalogue scoped to this room's venue, so the picker
+ * is now the same picker for everybody and the UUID field is gone.
+ *
+ * Query parameters are still read for the availability range, which is what
+ * they are for: a range is state about this view, not a fact about the room.
  */
 export default async function RoomPage({
   params,
@@ -41,37 +44,37 @@ export default async function RoomPage({
 
   const range = resolveRange(query);
 
+  // The room and its calendar in one round trip rather than two sequential
+  // ones. They are independent reads and the page needs both before it can
+  // render anything.
+  let room: Room;
   let availability: Availability;
   try {
-    availability = await api<Availability>(
-      `/rooms/${id}/availability${qs({
-        from: `${range.from}T00:00:00.000Z`,
-        to: `${range.to}T00:00:00.000Z`,
-        duration_minutes: range.duration,
-      })}`,
-    );
+    [room, availability] = await Promise.all([
+      api<Room>(`/rooms/${id}`),
+      api<Availability>(
+        `/rooms/${id}/availability${qs({
+          from: `${range.from}T00:00:00.000Z`,
+          to: `${range.to}T00:00:00.000Z`,
+          duration_minutes: range.duration,
+        })}`,
+      ),
+    ]);
   } catch (err: unknown) {
     return <RoomFailure error={err} />;
   }
 
-  // Staff see the real inventory; a CUSTOMER token gets 403 here and the panel
-  // says so rather than showing an empty picker that looks like a venue with no
-  // equipment. A PLATFORM_ADMIN sees every venue's, so it is narrowed to this
-  // room's venue when the link said which one that is.
-  //
-  // Three outcomes, and they must not collapse into one. "You may not read the
-  // catalogue", "this venue owns no equipment" and "you may read a catalogue,
-  // but not this room's venue's" are different facts, and a picker that renders
-  // empty for all three tells a venue admin standing in front of another
-  // venue's room that the venue has no cameras. It has cameras; they are just
-  // not this account's to see.
-  const equipmentState = await loadEquipment(query.venue_id);
+  // Scoped to the room's venue by the API, not filtered here. Readable by every
+  // signed-in role, so there is no longer an access branch to render — a
+  // customer, a venue admin from another venue and a platform admin all see the
+  // same list, which is the same list the hold path will price.
+  const equipment = await loadEquipment(id);
 
   return (
     <>
       <PageHeader
-        title={query.name ?? `Room ${shortId(id)}`}
-        description={[query.venue, query.city].filter(Boolean).join(' · ') || undefined}
+        title={room.name}
+        description={`${room.venue_name} · ${room.city}`}
         actions={
           <Button variant="ghost" asChild>
             <Link href="/search">Back to search</Link>
@@ -81,57 +84,50 @@ export default async function RoomPage({
 
       <div className="mb-6 flex flex-wrap items-center gap-6 rounded border border-line bg-surface px-4 py-3">
         <Fact label="Room id" value={id} mono />
-        <Fact label="Timezone" value={availability.timezone} mono />
+        <Fact label="Capacity" value={`${room.capacity}`} mono />
+        <Fact label="Rate / hr" value={amount(room.hourly_rate_minor)} mono />
+        <Fact
+          label="Times shown in"
+          value={`${room.timezone} (${zoneLabel(new Date().toISOString(), room.timezone)})`}
+        />
         <Fact
           label="Slot length"
           value={`${availability.duration_minutes / 60}h`}
           mono
         />
-        <Fact
-          label="Grid"
-          value={`${availability.granularity_minutes}m`}
-          mono
-        />
-        {query.rate ? <Fact label="Rate / hr" value={amount(query.rate)} mono /> : null}
+        <Fact label="Grid" value={`${availability.granularity_minutes}m`} mono />
+        {room.amenities.length > 0 ? (
+          <Fact label="Amenities" value={room.amenities.join(', ')} />
+        ) : null}
       </div>
 
       <RoomWorkspace
         roomId={id}
         availability={availability}
-        hourlyRateMinor={query.rate ?? null}
-        equipment={equipmentState.equipment}
-        equipmentAccess={equipmentState.access}
+        hourlyRateMinor={room.hourly_rate_minor}
+        equipment={equipment}
         range={range}
       />
     </>
   );
 }
 
-async function loadEquipment(venueId: string | undefined): Promise<{
-  equipment: EquipmentType[];
-  access: EquipmentAccess;
-}> {
-  let all: EquipmentType[];
-
+/**
+ * The equipment a booker may attach to this room.
+ *
+ * An unreachable catalogue is not a reason to fail the whole screen: the room
+ * is bookable without equipment, and a 500 here would take availability down
+ * with it. It degrades to an empty list, and the panel says the venue has none
+ * on record — which is the same sentence it showed before for a venue that
+ * genuinely has none.
+ */
+async function loadEquipment(roomId: string): Promise<EquipmentType[]> {
   try {
-    all = (await api<{ data: EquipmentType[] }>('/equipment-types')).data;
+    return (await api<{ data: EquipmentType[] }>(`/rooms/${roomId}/equipment-types`)).data;
   } catch (err: unknown) {
-    if (
-      err instanceof ApiUnreachableError ||
-      (err instanceof ApiError && (err.status === 403 || err.status === 404))
-    ) {
-      return { equipment: [], access: 'unreadable' };
-    }
+    if (err instanceof ApiUnreachableError || err instanceof ApiError) return [];
     throw err;
   }
-
-  if (!venueId) return { equipment: all, access: 'available' };
-
-  const mine = all.filter((type) => type.venue_id === venueId);
-  if (mine.length === 0 && all.length > 0) {
-    return { equipment: [], access: 'other_venue' };
-  }
-  return { equipment: mine, access: 'available' };
 }
 
 function Fact({
