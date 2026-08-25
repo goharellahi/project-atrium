@@ -5,7 +5,8 @@ import { createHold } from './actions';
 import { EMPTY_HOLD_STATE } from './hold-state';
 import { Button } from '@/components/ui/button';
 import { Callout, IssueList } from '@/components/ui/callout';
-import { Input, Label, Select } from '@/components/ui/input';
+import { Input, Label } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import { PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel';
 import { amount, dayIn, timeIn } from '@/lib/format';
 import type { EquipmentType, FreeSlot } from '@/lib/types';
@@ -311,18 +312,17 @@ function EquipmentPicker({
     <div className="flex items-end gap-2">
       <div className="min-w-0 flex-1">
         <Label htmlFor="equipment-type">Type</Label>
-        <Select
-          id="equipment-type"
-          value={selected}
-          onChange={(event) => setSelected(event.target.value)}
-          className="mt-1"
-        >
-          {equipment.map((type) => (
-            <option key={type.id} value={type.id}>
-              {type.name} — {type.units_owned} owned
-            </option>
-          ))}
-        </Select>
+        <div className="mt-1">
+          <Select
+            ariaLabel="Equipment type"
+            value={selected}
+            options={equipment.map((type) => ({
+              value: type.id,
+              label: `${type.name} — ${type.units_owned} owned`,
+            }))}
+            onValueChange={setSelected}
+          />
+        </div>
       </div>
       <div className="w-[72px]">
         <Label htmlFor="equipment-quantity">Qty</Label>

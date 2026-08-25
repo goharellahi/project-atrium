@@ -4,12 +4,12 @@ import { cn } from '@/lib/cn';
 /**
  * Text, number and select controls, and a label that goes with them.
  *
- * The select is the native element rather than a Radix listbox. That is a
- * decision, not a shortcut: this console's selects hold two to five short
- * options, the native control is already keyboard complete, already correct on
- * a touch device, and already renders above everything without a portal. Radix
- * earns its keep on a combobox with a hundred options and a filter; the two on
- * this screen would only inherit the maintenance.
+ * There is deliberately no select here. It used to be the native element, on the
+ * argument that this console's lists are short and the native control is already
+ * keyboard complete — but a native popup is drawn by the operating system, so
+ * every token stopped at the control's edge and it was the one element that gave
+ * the screen away. `components/ui/select.tsx` replaces it on Radix. Removing the
+ * export rather than deprecating it means nothing can quietly regress.
  */
 
 const CONTROL =
@@ -17,18 +17,6 @@ const CONTROL =
 
 export function Input({ className, ...props }: React.InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cn(CONTROL, className)} {...props} />;
-}
-
-export function Select({
-  className,
-  children,
-  ...props
-}: React.SelectHTMLAttributes<HTMLSelectElement>) {
-  return (
-    <select className={cn(CONTROL, 'pr-6', className)} {...props}>
-      {children}
-    </select>
-  );
 }
 
 export function Label({

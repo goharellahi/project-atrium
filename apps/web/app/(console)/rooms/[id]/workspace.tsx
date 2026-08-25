@@ -5,7 +5,9 @@ import { useEffect, useState, useTransition } from 'react';
 import { BookingPanel } from './booking-panel';
 import { Button } from '@/components/ui/button';
 import { Empty } from '@/components/ui/empty';
-import { Input, LabelledField, Select } from '@/components/ui/input';
+import { Input, Label } from '@/components/ui/input';
+import { LabelledField } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import { Panel, PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel';
 import { cn } from '@/lib/cn';
 import { dayIn, timeIn } from '@/lib/format';
@@ -103,21 +105,18 @@ export function RoomWorkspace({
                   className="font-mono text-data"
                 />
               </LabelledField>
-              <LabelledField label="Duration" htmlFor="range-duration" className="w-[140px]">
+              <div className="flex w-[140px] flex-col gap-1">
+                <Label htmlFor="range-duration">Duration</Label>
                 <Select
-                  id="range-duration"
+                  ariaLabel="Slot length"
                   value={String(form.duration)}
-                  onChange={(event) =>
-                    setForm({ ...form, duration: Number(event.target.value) })
-                  }
-                >
-                  {[60, 90, 120, 180, 240, 360, 480].map((minutes) => (
-                    <option key={minutes} value={minutes}>
-                      {minutes / 60} {minutes === 60 ? 'hour' : 'hours'}
-                    </option>
-                  ))}
-                </Select>
-              </LabelledField>
+                  options={[60, 90, 120, 180, 240, 360, 480].map((minutes) => ({
+                    value: String(minutes),
+                    label: `${minutes / 60} ${minutes === 60 ? 'hour' : 'hours'}`,
+                  }))}
+                  onValueChange={(next) => setForm({ ...form, duration: Number(next) })}
+                />
+              </div>
               <Button type="submit" disabled={pending}>
                 {pending ? 'Loading…' : 'Apply'}
               </Button>

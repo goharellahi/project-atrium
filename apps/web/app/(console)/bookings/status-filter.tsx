@@ -2,15 +2,19 @@
 
 import { useRouter } from 'next/navigation';
 import { useTransition } from 'react';
-import { Select } from '@/components/ui/input';
+import { Select } from '@/components/ui/select';
 import type { BookingStatus } from '@/lib/types';
 
 /**
  * The status filter.
  *
- * Nine statuses and one "all", which is few enough for a native select and far
- * too few to justify a listbox. Selecting navigates — the filter is in the URL
- * like every other filter in this console, so a filtered list is a link.
+ * On the styled select rather than the native one. Nine statuses is few enough
+ * that a native control would have worked functionally, and that was the old
+ * argument for it — but it was the only element on the screen whose popup was
+ * drawn by the operating system, and it showed.
+ *
+ * Selecting navigates: the filter lives in the URL like every other filter in
+ * this console, so a filtered list is a link.
  */
 const STATUSES: BookingStatus[] = [
   'HELD',
@@ -24,29 +28,31 @@ const STATUSES: BookingStatus[] = [
   'DRAFT',
 ];
 
+const ALL = '__all__';
+
 export function StatusFilter({ basePath, value }: { basePath: string; value: string }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
 
   return (
-    <Select
-      aria-label="Filter by status"
-      className="w-[180px]"
-      value={value}
-      disabled={pending}
-      onChange={(event) => {
-        const next = event.target.value;
-        startTransition(() =>
-          router.push(next === '' ? basePath : `${basePath}?status=${next}`),
-        );
-      }}
-    >
-      <option value="">All statuses</option>
-      {STATUSES.map((status) => (
-        <option key={status} value={status}>
-          {status.replace('_', ' ')}
-        </option>
-      ))}
-    </Select>
+    <div className="w-[196px]">
+      <Select
+        ariaLabel="Filter by status"
+        value={value === '' ? ALL : value}
+        disabled={pending}
+        options={[
+          { value: ALL, label: 'All statuses' },
+          ...STATUSES.map((status) => ({
+            value: status,
+            label: status.replace('_', ' '),
+          })),
+        ]}
+        onValueChange={(next) => {
+          startTransition(() =>
+            router.push(next === ALL ? basePath : `${basePath}?status=${next}`),
+          );
+        }}
+      />
+    </div>
   );
 }

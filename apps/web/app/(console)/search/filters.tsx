@@ -3,28 +3,23 @@
 import { useRouter } from 'next/navigation';
 import { useEffect, useState, useTransition } from 'react';
 import { Button } from '@/components/ui/button';
-import { Input, LabelledField, Select } from '@/components/ui/input';
+import { DateTimeField } from '@/components/ui/datetime-field';
+import { Input, LabelledField } from '@/components/ui/input';
+import { instantToWallClock, wallClockToInstant, type WallClock } from '@/lib/wall-clock';
 
 /**
  * The search filters.
  *
  * Every filter is a URL parameter and the URL is the state. That is worth the
- * small amount of plumbing: a result set an operator wants a colleague to look
- * at is a link, the back button returns to the previous query instead of
- * clearing it, and a reload does not lose the last twenty seconds of work. A
- * `useState` form would have none of those properties and would look identical.
+ * plumbing: a result set an operator wants a colleague to look at is a link, the
+ * back button returns to the previous query instead of clearing it, and a reload
+ * does not lose the last twenty seconds of work.
  *
- * Initial values arrive as props from the server component rather than from
- * `useSearchParams`, so this never triggers a client-side bailout and the
- * filter bar is present in the first paint.
- *
- * The two window fields are the exception, and the exception is unavoidable.
- * They are `datetime-local`, which is wall-clock in the reader's own zone; the
- * server does not know that zone. Rendering an instant into them on the server
- * would either show UTC labelled as local, or shift the window on the next
- * submit when the client reads it back as local. So the server sends the raw
- * instants and they are converted after hydration, in an effect, where the
- * zone is known. Everything else is server-rendered with its value in place.
+ * The availability window is the only part that cannot be server-rendered with
+ * its value in place. It is a local wall clock and the server does not know the
+ * reader's zone, so the instants arrive as props and are converted after
+ * hydration — see `lib/wall-clock.ts` for why that conversion is a tested
+ * function rather than a `new Date(string)` somewhere in this file.
  */
 
 export interface FilterValues {
@@ -32,23 +27,9 @@ export interface FilterValues {
   min_capacity: string;
   amenity: string;
   max_rate_major: string;
-  /** ISO instants as they appear in the URL, not `datetime-local` values. */
+  /** ISO instants exactly as they appear in the URL. */
   from_iso: string;
   to_iso: string;
-}
-
-interface FormValues extends Omit<FilterValues, 'from_iso' | 'to_iso'> {
-  from: string;
-  to: string;
-}
-
-/** An instant to the `datetime-local` value that means the same moment here. */
-function toLocalInput(iso: string): string {
-  if (!iso) return '';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  const offsetMs = date.getTimezoneOffset() * 60_000;
-  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16);
 }
 
 /** Cities in the seed. A datalist rather than a select — the database may hold others. */
@@ -73,81 +54,73 @@ const SEEDED_AMENITIES = [
 export function SearchFilters({ initial }: { initial: FilterValues }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
-  const [values, setValues] = useState<FormValues>({
-    city: initial.city,
-    min_capacity: initial.min_capacity,
-    amenity: initial.amenity,
-    max_rate_major: initial.max_rate_major,
-    from: '',
-    to: '',
-  });
 
-  // Runs once after hydration, when `getTimezoneOffset` is meaningful. A link
-  // shared with an availability window in it therefore opens showing that
-  // window in the reader's own clock rather than in UTC wearing a local label.
+  const [city, setCity] = useState(initial.city);
+  const [minCapacity, setMinCapacity] = useState(initial.min_capacity);
+  const [amenity, setAmenity] = useState(initial.amenity);
+  const [maxRate, setMaxRate] = useState(initial.max_rate_major);
+  const [from, setFrom] = useState<Partial<WallClock>>({});
+  const [to, setTo] = useState<Partial<WallClock>>({});
+
+  // Runs once after hydration, where the reader's zone is knowable. A link
+  // shared with a window in it therefore reopens showing that window on the
+  // reader's own clock rather than in UTC wearing a local label.
   useEffect(() => {
-    setValues((previous) => ({
-      ...previous,
-      from: toLocalInput(initial.from_iso),
-      to: toLocalInput(initial.to_iso),
-    }));
+    setFrom(initial.from_iso ? (instantToWallClock(initial.from_iso) ?? {}) : {});
+    setTo(initial.to_iso ? (instantToWallClock(initial.to_iso) ?? {}) : {});
   }, [initial.from_iso, initial.to_iso]);
 
-  function set<K extends keyof FormValues>(key: K, value: string) {
-    setValues((previous) => ({ ...previous, [key]: value }));
-  }
+  const fromInstant = wallClockToInstant(from);
+  const toInstant = wallClockToInstant(to);
+  const windowStarted = Boolean(from.date || from.time || to.date || to.time);
+  const windowIncomplete = windowStarted && (fromInstant === null || toInstant === null);
+  const windowBackwards =
+    fromInstant !== null && toInstant !== null && toInstant <= fromInstant;
 
   function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (windowIncomplete || windowBackwards) return;
 
     const params = new URLSearchParams();
-    if (values.city.trim()) params.set('city', values.city.trim());
-    if (values.min_capacity.trim()) params.set('min_capacity', values.min_capacity.trim());
+    if (city.trim()) params.set('city', city.trim());
+    if (minCapacity.trim()) params.set('min_capacity', minCapacity.trim());
 
     // The API accepts `?amenity=a&amenity=b` or one comma-separated value, and
     // containment semantics: a room must have every amenity asked for, not any
     // of them. The hint under the field says so, because "wifi, grand_piano"
     // returning nothing is otherwise indistinguishable from a broken filter.
-    for (const amenity of values.amenity.split(',').map((a) => a.trim()).filter(Boolean)) {
-      params.append('amenity', amenity);
+    for (const entry of amenity.split(',').map((a) => a.trim()).filter(Boolean)) {
+      params.append('amenity', entry);
     }
 
-    if (values.max_rate_major.trim()) params.set('max_rate', values.max_rate_major.trim());
+    if (maxRate.trim()) params.set('max_rate', maxRate.trim());
 
-    // `datetime-local` yields a wall-clock string with no zone. It is the
-    // reader's own clock, so converting through `Date` and out to an instant is
-    // correct — and it has to happen here, on the client, because the server
-    // has no idea which zone the reader is in.
-    if (values.from && values.to) {
-      params.set('from', new Date(values.from).toISOString());
-      params.set('to', new Date(values.to).toISOString());
+    if (fromInstant && toInstant) {
+      params.set('from', fromInstant);
+      params.set('to', toInstant);
     }
 
-    startTransition(() => {
-      router.push(`/search?${params.toString()}`);
-    });
+    startTransition(() => router.push(`/search?${params.toString()}`));
   }
-
-  const windowHalfSet = Boolean(values.from) !== Boolean(values.to);
 
   return (
     <form
       onSubmit={submit}
-      className="rounded border border-line bg-surface p-4"
+      className="rounded border border-line bg-surface"
       aria-label="Room filters"
     >
-      <div className="grid gap-4 md:grid-cols-4">
+      <div className="grid gap-4 p-4 md:grid-cols-2 xl:grid-cols-4">
         <LabelledField label="City" htmlFor="city">
           <Input
             id="city"
             list="atrium-cities"
-            value={values.city}
-            onChange={(event) => set('city', event.target.value)}
+            value={city}
+            onChange={(event) => setCity(event.target.value)}
             placeholder="Any city"
           />
           <datalist id="atrium-cities">
-            {SEEDED_CITIES.map((city) => (
-              <option key={city} value={city} />
+            {SEEDED_CITIES.map((entry) => (
+              <option key={entry} value={entry} />
             ))}
           </datalist>
         </LabelledField>
@@ -159,8 +132,8 @@ export function SearchFilters({ initial }: { initial: FilterValues }) {
             min={1}
             max={10000}
             inputMode="numeric"
-            value={values.min_capacity}
-            onChange={(event) => set('min_capacity', event.target.value)}
+            value={minCapacity}
+            onChange={(event) => setMinCapacity(event.target.value)}
             placeholder="Any size"
             className="font-mono text-data"
           />
@@ -176,8 +149,8 @@ export function SearchFilters({ initial }: { initial: FilterValues }) {
             type="number"
             min={0}
             inputMode="decimal"
-            value={values.max_rate_major}
-            onChange={(event) => set('max_rate_major', event.target.value)}
+            value={maxRate}
+            onChange={(event) => setMaxRate(event.target.value)}
             placeholder="No ceiling"
             className="font-mono text-data"
           />
@@ -191,45 +164,41 @@ export function SearchFilters({ initial }: { initial: FilterValues }) {
           <Input
             id="amenity"
             list="atrium-amenities"
-            value={values.amenity}
-            onChange={(event) => set('amenity', event.target.value)}
+            value={amenity}
+            onChange={(event) => setAmenity(event.target.value)}
             placeholder="wifi, blackout"
             className="font-mono text-data"
           />
           <datalist id="atrium-amenities">
-            {SEEDED_AMENITIES.map((amenity) => (
-              <option key={amenity} value={amenity} />
+            {SEEDED_AMENITIES.map((entry) => (
+              <option key={entry} value={entry} />
             ))}
           </datalist>
         </LabelledField>
 
-        <LabelledField label="Available from" htmlFor="from">
-          <Input
-            id="from"
-            type="datetime-local"
-            value={values.from}
-            onChange={(event) => set('from', event.target.value)}
-            className="font-mono text-data"
-          />
-        </LabelledField>
-
-        <LabelledField
+        <DateTimeField
+          id="from"
+          label="Available from"
+          value={from}
+          onChange={setFrom}
+          disabled={pending}
+        />
+        <DateTimeField
+          id="to"
           label="Available to"
-          htmlFor="to"
-          hint="Both ends, or neither. Your local clock."
-        >
-          <Input
-            id="to"
-            type="datetime-local"
-            value={values.to}
-            onChange={(event) => set('to', event.target.value)}
-            className="font-mono text-data"
-          />
-        </LabelledField>
+          hint="Your local clock. Sent to the API as an instant."
+          value={to}
+          onChange={setTo}
+          disabled={pending}
+        />
       </div>
 
-      <div className="mt-4 flex items-center gap-3 border-t border-line pt-4">
-        <Button type="submit" variant="primary" disabled={pending || windowHalfSet}>
+      <div className="flex flex-wrap items-center gap-3 border-t border-line px-4 py-3">
+        <Button
+          type="submit"
+          variant="primary"
+          disabled={pending || windowIncomplete || windowBackwards}
+        >
           {pending ? 'Searching…' : 'Search'}
         </Button>
         <Button
@@ -237,23 +206,32 @@ export function SearchFilters({ initial }: { initial: FilterValues }) {
           variant="ghost"
           disabled={pending}
           onClick={() => {
-            setValues({
-              city: '',
-              min_capacity: '',
-              amenity: '',
-              max_rate_major: '',
-              from: '',
-              to: '',
-            });
+            setCity('');
+            setMinCapacity('');
+            setAmenity('');
+            setMaxRate('');
+            setFrom({});
+            setTo({});
             startTransition(() => router.push('/search'));
           }}
         >
           Clear
         </Button>
 
-        {windowHalfSet ? (
+        {windowIncomplete ? (
           <p className="text-sm text-ink-muted">
-            The availability window needs both ends — the API rejects one on its own.
+            The availability window needs a date and a time at both ends — the API
+            rejects half of one.
+          </p>
+        ) : null}
+        {windowBackwards ? (
+          <p className="text-sm text-ink-muted">
+            The end of the window must be after its start.
+          </p>
+        ) : null}
+        {!windowIncomplete && !windowBackwards && fromInstant && toInstant ? (
+          <p className="font-mono text-xs text-ink-muted">
+            {fromInstant} → {toInstant}
           </p>
         ) : null}
       </div>

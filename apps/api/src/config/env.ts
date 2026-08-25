@@ -31,6 +31,26 @@ const EnvSchema = z.object({
     .default('false')
     .transform((v) => v === 'true'),
 
+  /**
+   * Seed the database during boot, but only if it has never been seeded.
+   *
+   * Render's free tier gives no shell and no one-off jobs, so the only process
+   * that can reach the managed database is the API itself. This is the flag
+   * that lets it, and the guard that makes it safe is not here — it is in
+   * `seedOnBootIfUnseeded`, which refuses to run against a database that
+   * already has a venue in it.
+   *
+   * That guard is what makes leaving this set harmless. The seed TRUNCATEs
+   * before it inserts, so a boot path that ran unconditionally would wipe the
+   * database on every restart — and a free-tier service restarts every time it
+   * wakes from sleep. "Only when there is nothing to lose" is the difference
+   * between a deployment tool and a foot-gun.
+   *
+   * `off` by default, and docker compose never sets it: the local stack seeds
+   * through the CLI, where a human is present to mean it.
+   */
+  SEED_ON_BOOT: z.enum(['off', 'demo', 'full']).default('off'),
+
   // Booking rules. See ARCHITECTURE.md Assumption 1 for why the 8-minute TTL
   // and the 10-minute checkout guarantee are two separate numbers.
   HOLD_TTL_SECONDS: z.coerce.number().int().positive().default(480),
