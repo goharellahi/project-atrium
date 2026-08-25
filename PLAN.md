@@ -13,6 +13,15 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 > list below matches the branch names in the Working Agreement, which is the
 > authority. Old P1+P2 merged into the new P1; old P3+P4 into the new P2.
 
+> **Rescoped at P8. The deadline was extended and the Tier 3 cut is withdrawn.**
+> Every tier is now in scope and nothing is deliberately cut. The ordering rule
+> is unchanged and is now the binding constraint: **nothing in a lower tier
+> starts until Tier 1 is correct, tested and deployed.** Tier 1 was not correct,
+> so P8 was split — phase A closes the Tier 1 gaps, and Tier 2 and Tier 3 follow
+> in later phases. See "Explicit non-goals" below, which is now a record of a
+> decision that was reversed rather than a list of things that will not be
+> built.
+
 ---
 
 ## P0 — Scaffolding and design · `main`
@@ -80,11 +89,14 @@ Legend: `[ ]` not started · `[~]` in progress · `[x]` done
 - [x] Background hold sweeper, HELD to EXPIRED, elected by advisory lock
 - [x] Checkout re-arm: 10 minutes, at most twice, 30-minute lifetime cap
 - [x] Payment provider interface defined, unimplemented (P3 owns the client)
-- [ ] Overbooking buffer honoured for equipment; rooms reject non-zero with 422
-      — **the equipment half is done, the room-side 422 is not.** No endpoint
-      writes `venues.overbooking_buffer_pct` yet; the CHECK constraint caps it
-      at 10% and the admission ceiling reads it. The 422 lands with venue
-      administration in P6.
+- [x] Overbooking buffer honoured for equipment; rooms reject non-zero with 422
+      — **closed in P8 phase A**, three phases after it was written. The
+      equipment half was done here; the room-side 422 had no way to be reached
+      because nothing wrote `venues.overbooking_buffer_pct`.
+      `PATCH /venues/settings` writes it, `POST`/`PATCH /venues/rooms` refuse a
+      non-zero buffer with 422 and the reason, and
+      `tests/e2e/src/overbooking-buffer.e2e.test.ts` proves the whole chain
+      through the endpoints
 - [ ] Unit tests over the state machine, every failure edge — **cut for time.**
       The transition table is covered end-to-end by the proof and by manual
       probes; the per-edge unit suite moves to P5.
@@ -295,12 +307,13 @@ keeping. The rest are recorded, not fixed:
 - [x] **`GET /search?amenity=…` was 500 for every input.** Fixed, with a
       database-backed regression test that fails without the fix. Root cause in
       the progress entry below.
-- **No `GET /rooms/:id`.** `/search` cannot filter by id, so a room's name,
-  venue and rate cannot be fetched for a room already chosen. The console
-  carries them on the link instead and degrades to the id on a bare deep link.
-- **No customer-readable equipment catalogue.** `GET /equipment-types` is staff
-  only, `POST /bookings/hold` accepts line items from anyone, so a customer can
-  book equipment but cannot discover it.
+- ~~**No `GET /rooms/:id`.**~~ **Closed in P8 phase A.** The room screen loads
+  the room, and the search link is a bare link again.
+- ~~**No customer-readable equipment catalogue.**~~ **Closed in P8 phase A.**
+  `GET /rooms/:id/equipment-types` answers the booker's question — what can I
+  attach to THIS room — rather than the venue's, so the scope comes from the
+  resource instead of from the caller. `GET /equipment-types` stays staff-only
+  and unchanged.
 - **No refund preview endpoint.** The brief requires the refund be shown before
   the customer confirms; the API computes it inside the cancellation
   transaction. `apps/web/lib/refund.ts` re-implements the arithmetic exactly
@@ -310,17 +323,65 @@ keeping. The rest are recorded, not fixed:
 
 ---
 
-## P8 — Final documents · `docs/p8-final`
+## P8 phase A — the Tier 1 correctness gaps · `feat/p8-tier1-closure`
+
+> Cut from `main` after P7 merged. The brief is explicit that nothing in a lower
+> tier starts until Tier 1 is correct, tested and deployed — and six things
+> found by walking the deployed console said it was not. This phase is those
+> six and nothing else.
+
+- [x] Seeded CONFIRMED, COMPLETED, CANCELLED and REFUNDED bookings carry the
+      cancellation policy that was live at their confirmation, resolved as-of
+      rather than as-now. Fixed in the seed, **not** by letting cancellation
+      fall back to the live policy — that fallback would silently break the
+      guarantee a snapshot exists to make
+- [x] A CONFIRMED booking showing PAYMENT: PENDING — diagnosed as the console
+      rendering the provider's 202 and never asking again. `payments.status`
+      **is** advanced on capture, so INV-5 was never at risk.
+      `GET /bookings/:id` now publishes the settled row the reconciler reads
+- [x] `GET /rooms/:id/equipment-types` — a customer-readable catalogue scoped to
+      the room's venue, exposing name, hourly rate and units owned and nothing
+      operational. Covered by the census as probed, not exempt
+- [x] `GET /rooms/:id` — readable by any signed-in user, same projection as one
+      `/search` row
+- [x] Venue administration: `GET`/`PATCH /venues/settings`, `GET`/`POST
+      /venues/rooms`, `PATCH /venues/rooms/:id`, `POST /venues/equipment-types`,
+      `PATCH /venues/equipment-types/:id`. VENUE_ADMIN for the writes,
+      VENUE_STAFF for the reads, venue from the token and never from a path or
+      body. All seven in the census; all seven probed with the write actually
+      read back from the database afterwards
+- [x] The overbooking buffer proven end to end through the endpoints: 3 units at
+      10% admits a peak of 3 and refuses the request that would pass 3.3; 10
+      units at 10% admits an eleventh; the same 10 units at 0% refuses it
+- [x] Console: role-appropriate navigation, a reconciliation screen for the only
+      role that can call it, honest scope wording for a customer, one time
+      convention applied everywhere and labelled, styled date controls
+
+## P8 phase B — the final documents · `docs/p8-final`
 
 - [~] `DECISIONS.md` — 11 entries written in P4 and P5 as the decisions were
       made; the P0–P2 ones still live in `ARCHITECTURE.md` §3 and §7 and fold in
-      here during P8
+      here
 - [ ] `AI_LOG.md` — what was delegated, where the agent was wrong or naive
 - [ ] `TIMELINE.md` — hour by hour, what was cut, why
 - [ ] `ARCHITECTURE.md` stubs completed: ERD, state machine, payment integrity,
       indexing, stack justification, 100x, two more weeks
-- [ ] Five test logins: one per role plus a second venue admin at another venue
+- [x] Five test logins: one per role plus a second venue admin at another venue
+      — seeded, printed by the seed, and on the sign-in screen with one-click
+      fill since P7
 - [ ] 5-minute walkthrough recording
+
+## P9 — Tier 2 · not started
+
+The admin console over the P8 endpoints, the revenue and utilisation screen over
+the P6 API, and whatever else Tier 2 names. Blocked on Tier 1 being **deployed**,
+not merely correct — which is a dashboard action, not a code one.
+
+## P10 — Tier 3 · not started
+
+Reinstated by the deadline extension. Live heatmap and WebSockets, natural
+language booking, recurring bookings, waitlist with automatic promotion,
+notifications.
 
 ---
 
@@ -328,8 +389,10 @@ keeping. The rest are recorded, not fixed:
 
 - [ ] Public git repository with real commit history
 - [~] Deployed API URL — https://atrium-api-3p3j.onrender.com — live, `/health`
-      green with Postgres up and the platform cancellation policy present. The
-      database is still unseeded.
+      green with Postgres up and the platform cancellation policy present, and
+      seeded since P7. **Running pre-P8 code**: the three routes added in phase
+      A answer 404 there, and a seeded CONFIRMED booking still returns
+      `policy_snapshot: null`. Deploying is the human's action.
 - [~] Deployed Paygate URL — https://atrium-paygate.onrender.com — live, chaos
       on, seed `atrium-render`, test endpoints off (permanently, by Dockerfile),
       `callback_url_configured: true`. Both `sync: false` variables are set:
@@ -352,18 +415,28 @@ keeping. The rest are recorded, not fixed:
 - [x] `DESIGN.md`
 - [x] Tests: concurrency proof, cross-venue authz, state machine units, refund
       calculator units, one end-to-end happy path — all delivered and all run
-      against three replicas in P5 (118 assertions; transcripts in
-      `ARCHITECTURE.md` Appendices B–D)
+      against three replicas (P5, re-run in P8 phase A at 168 assertions: 98
+      offline, 37 authz, 5 proof, 28 e2e; transcripts in `ARCHITECTURE.md`
+      Appendices B–D and the P8 progress entry)
 - [ ] Walkthrough recording
 
-### Explicit non-goals
+### Explicit non-goals — **withdrawn at P8**
 
-Tier 3 is deliberately unscheduled: live heatmap and WebSockets, natural
-language booking, recurring bookings, waitlist with automatic promotion,
-notifications. The brief is direct that a beautiful real-time calendar with a
-race condition in the hold path scores below a plain submission with all of
-Tier 1 correct. Revisited only if time remains after P8, and recorded in
-`TIMELINE.md` either way.
+> The original entry read: *"Tier 3 is deliberately unscheduled: live heatmap and
+> WebSockets, natural language booking, recurring bookings, waitlist with
+> automatic promotion, notifications. The brief is direct that a beautiful
+> real-time calendar with a race condition in the hold path scores below a plain
+> submission with all of Tier 1 correct. Revisited only if time remains after
+> P8."*
+>
+> **The deadline was extended, so the cut is withdrawn and the whole brief is in
+> scope.** It is left in rather than deleted because the reasoning was right when
+> it was written and is still the reason for the ORDER: a beautiful real-time
+> calendar over a racy hold path scores below a plain correct submission, so
+> Tier 3 stays behind Tier 1 and Tier 2 rather than beside them. What changed is
+> the amount of time, not the priority.
+
+There are no explicit non-goals now. Everything is scheduled; see P9 and P10.
 
 ---
 
@@ -1256,3 +1329,254 @@ PLATFORM_ADMIN 25,008 bookings (all venues)
 set on the Render service and a redeploy, which is a dashboard action. The
 mechanism is built and proved; the deployed run is the step after it. That is
 the one part of this phase that is finished in code and unfinished in fact.
+
+---
+
+### 2026-08-25 — P8 phase A: the Tier 1 correctness gaps
+
+**Rescoped first.** The deadline was extended, so the Tier 3 cut is withdrawn
+and the whole brief is in scope. The ordering rule is unchanged and is now the
+binding constraint rather than a preference: nothing in a lower tier starts
+until Tier 1 is correct, tested and deployed. Six observations from walking the
+deployed console as all three roles said Tier 1 was not correct. This phase is
+those six.
+
+**Every one of them was found in a browser, not in a test.** That is the fourth
+consecutive phase where that is true, and it is worth stating plainly: the
+suites were green throughout, and green suites did not notice that a customer
+could not book equipment, that no seeded booking carried the terms it was sold
+under, or that the console had two different opinions about what hour a booking
+was at.
+
+#### The six, and what each turned out to be
+
+**1. Seeded settled bookings carried no policy snapshot.** The seed writes
+CONFIRMED, COMPLETED, CANCELLED and REFUNDED rows directly; the live path that
+reaches those states is `onChargeSucceeded`, which is where `policy_snapshot` is
+written. So on demo data every booking detail page read "No cancellation terms
+were frozen onto this booking" and the entire policy-as-data story was invisible
+on exactly the data a reviewer looks at first.
+
+Fixed in the seed. The alternative — letting cancellation fall back to the live
+policy — was refused: the guarantee is that a policy change cannot alter an
+already CONFIRMED booking, and a fallback breaks it silently for every booking
+whose snapshot is missing *for any reason*, including the ones where it is
+missing because something went wrong.
+
+Two supporting changes were needed to make the fix mean anything. Bookings now
+carry a real `created_at` — one to six weeks before their start, never in the
+future — because they previously defaulted to `now()`, so a two-year-old
+COMPLETED booking claimed to have been created in the second the seed ran, and
+every as-of resolution would have picked the newest policy. And every third
+venue now gets its own cancellation policy, written partway through that venue's
+booking history and with the platform default backdated three years, so one
+venue shows bookings on both sides of a policy change carrying different frozen
+tiers. Without that the snapshots would all resolve identically and freezing
+them would have no visible effect. On the demo profile: 23,668 settled bookings
+with a snapshot, three venues showing both `platform` and `venue` resolutions.
+
+**2. PAYMENT: PENDING on a CONFIRMED booking — the console, not the database.**
+The question was whether `payments.status` is never advanced on capture, which
+would matter for INV-5 because the reconciliation report's notion of a captured
+charge would rest on a column that never moves. It is not that.
+`onChargeSucceeded` advances it to SUCCEEDED in the same transaction that
+confirms the booking, and the reconciler has always read that column.
+
+The stale value was in the browser. `POST /bookings/:id/pay` answers once,
+describing the charge as ACCEPTED, and nothing the console could call would say
+what happened afterwards — `GET /bookings/:id` carried no payment at all. It now
+publishes the settled row, under the same tenant scope the booking was found by,
+and checkout shows "Accepted as" beside "Settled as". Both are kept: "accepted,
+awaiting the webhook" is a real state and the whole shape of an at-least-once
+channel. What was wrong was showing only the first and calling it the current
+state.
+
+**3. Equipment was unreachable for the only role that books.**
+`GET /equipment-types` is staff-only and correctly so — it is reached without a
+room, so its scope can only come from the token, and a customer has no venue.
+But `POST /bookings/hold` accepts line items from anyone, so the console offered
+a customer a box to paste a UUID into and a sentence explaining why there was no
+list. Honest and useless.
+
+`GET /rooms/:id/equipment-types` answers the booker's question instead of the
+venue's: what can I attach to THIS room. The room names the venue, so the scope
+comes from the resource being read rather than from the caller — the id is not
+being trusted as an authorisation input. Name, hourly rate, units owned, and
+nothing operational: no utilisation, no revenue, and in particular not how many
+are out right now, which is a live figure about another venue's customers and
+would be stale by the time it was read. The picker shows all three; a 409 now
+renders the API's own arithmetic rather than "that slot is no longer free",
+because the room's 409 and equipment's 409 mean opposite things and the fixes
+are opposite too.
+
+**4. `GET /rooms/:id`.** Added, readable by any signed-in user. The room screen
+loads the room instead of carrying it on the querystring, so a pasted URL
+renders as a clicked one does.
+
+**5. The overbooking buffer could not be set at all, and now is proven.** Seven
+venue-administration routes, VENUE_ADMIN for the writes and VENUE_STAFF for the
+reads, venue from the token and no venue id anywhere in a path or body. The
+buffer is capped at 10 in three places and none is redundant: the schema so a
+client gets 422 with the range, `venues_overbooking_buffer_ck` so a write that
+never sees the schema still cannot store 40, and `admissionCeiling` flooring the
+product so a buffer cannot admit a fractional unit.
+
+The P2 room-side 422 finally runs against a real request. Rooms accept
+`overbooking_buffer_pct` and refuse any non-zero value with the reason, rather
+than ignoring the field — a schema that dropped it silently would let a venue
+admin believe a buffer was enabled on a room, and the first they would hear
+otherwise is a double booking that did not happen.
+
+Proven end to end through the endpoints rather than around them: three units at
+10% has a ceiling of `floor(3.3) = 3`, admits a peak of exactly 3, and refuses
+the fourth with the arithmetic quoted. That case is necessary and not
+sufficient, because a zero buffer does the same thing — so ten units at 10%
+admits an eleventh, and the control at 0% refuses the same eleventh. The
+difference is the buffer and nothing else about the fixture.
+
+**6. Console.** A platform admin was offered a "Venue" item for a venue they do
+not have and no route to the one report that is theirs alone, because the nav
+was gated on `isStaff`, which is true for them. `hasVenueScope` is the question
+that was actually being asked. Labels differ by role now too: `GET /bookings` is
+scoped by the token, so for a platform admin it is every booking on the
+platform, and calling that "My bookings" is a lie in the navigation. A
+customer's "all venues" — which describes a privilege they do not have — is now
+"your own bookings". `/reconciliation` is a new screen and is the opposite of
+every other one: an empty table is the claim being upheld, so all eight checks
+are named whether or not any fired.
+
+#### Seven defects found by running it, and one of them had never worked
+
+1. **The seed's snapshot UPDATE was invalid SQL.** `UPDATE bookings b ... FROM
+   LATERAL (... references b ...)` — a LATERAL in an UPDATE may only correlate
+   with tables in the FROM clause, and the UPDATE target is not one of them.
+   Caught on the first seed run; the query had never executed.
+2. **Both Node services crash-looped on a host with no IPv6.** `listen('::')`
+   answers EAFNOSUPPORT, which was fatal, so `docker compose up` never came up
+   at all on such a host. Both now fall back once to `0.0.0.0` and say so at
+   WARN. Only EAFNOSUPPORT is caught; a port already in use still fails loudly.
+3. **`docker compose up` stood up a console that could not reach the API**, and
+   both halves of the reason were independently wrong. The web service set
+   `NEXT_PUBLIC_API_BASE_URL`, which nothing reads — `apps/web/lib/api.ts`
+   consults `API_URL` then `NEXT_PUBLIC_API_URL`. And the value was
+   `localhost:8080`, which inside that container is that container; every call
+   the console makes is server-side, so it has to be `nginx:8080`. The login
+   screen said "The API could not be reached", which is the message for a cold
+   free-tier API and was entirely misleading.
+4. **The room screen had hydrated wrong for its whole life.**
+   `Intl.DateTimeFormat('en-GB').format()` renders a short weekday-day-month as
+   `Tue 25 Aug` on Node 26's ICU and `Tue, 25 Aug` on Chrome's; `groupByDay`
+   runs in a client component, so both rendered and React threw the tree away.
+   Invisible in production — it surfaces as minified error #418 in a console
+   nobody reads. Every formatter now assembles its output from `formatToParts`,
+   `hourCycle: 'h23'` replaces the ambiguous `hour12: false`, and `zoneLabel`
+   became arithmetic (`UTC+05:30`) rather than an abbreviation lookup. Pinned by
+   `apps/web/lib/format.test.ts` with exact strings — a test asserting "contains
+   Aug" would have passed throughout.
+5. **Availability offered slots that had already happened.** It enumerated from
+   the venue's opening time regardless of the hour, so clicking the first slot of
+   the day answered "must start at least 60 minutes ahead" — which reads as a
+   console bug, and which the console's own empty-state text already claimed the
+   API applied. Availability stays advisory; what it stops doing is advising
+   something no amount of racing could have made work.
+6. **An INV-4 audit assertion had been a coin flip since P4.** It counted every
+   audit row whose `to_state` is EXPIRED and expected exactly one — but a refund
+   settling against an already-terminal booking writes `EXPIRED -> EXPIRED`, a
+   deliberate record of money moving. Whether that row exists when the assertion
+   runs depends on whether Paygate's own delivery has landed. Nothing in the
+   product was wrong, which is exactly why it is worth recording: a suite that
+   passes for timing reasons is not passing.
+7. **A seeded booking's refund can never settle, and the fix is to say so.**
+   Cancelling a seeded CONFIRMED booking quotes the right refund, cancels
+   correctly, mints the refund key — and Paygate answers `404 unknown_charge`,
+   because the seed invents `ch_seed_<uuid>` and Paygate is a separate process
+   that has never heard of it. This was invisible until now: with no snapshot,
+   a seeded cancellation refunded nothing and never reached the provider, so
+   fixing (1) is what exposed it.
+
+   Three ways to make seeded money real were considered and all are worse.
+   Registering 20,000 charges with a service that fails 10% of them on purpose
+   and keeps its store in memory — one restart and it is synthetic again.
+   Registering only the cancellable ones — Paygate mints its own ids, so the
+   seed would have to write back whatever came out, and every accepted charge
+   triggers a webhook that would try to confirm already-confirmed bookings and
+   fill the audit trail with illegal-transition errors. Or special-casing
+   `ch_seed_` in the refund path, which is a payment path that knows about seed
+   data and is a fail condition rather than a shortcut.
+
+   So the API records the provider's own rejection on the payment row — before,
+   a rejected refund existed only as a log line, and "the provider was never
+   reached" and "the provider says this charge does not exist" were
+   indistinguishable in the report — and the seed states the limitation in its
+   code, in its output and in README. **A booking made through the console
+   refunds for real.** Only seeded history cannot, and
+   `refund_initiated_not_settled` is right to say so.
+
+#### Verified
+
+`docker compose up` from an empty volume: seven services healthy, three replicas
+behind nginx.
+
+```
+pnpm test    74 offline (29 api + 39 paygate + 1 census + 5 web)
+             + 18 web format units and 6 database-backed api tests when a
+               DATABASE_URL is present  -> 98
+pnpm authz   37 INV-6 assertions, up from 24 — the venue administration writes,
+             the two new catalogue routes, and a probe ledger that fails if a
+             route is listed as covered and never actually requested
+pnpm proof   200 concurrent holds, 1 admitted; 200 for 3 units, 3 admitted;
+             0 5xx; api1=135 api2=132 api3=133
+pnpm e2e     28 — 22 payment integrity, 6 overbooking buffer
+```
+
+Reconciliation on a freshly seeded database: **0 discrepancies**, 20,721 settled
+payments, 7,226 confirmed bookings. The three that appeared on an earlier run
+were the authz suite's own fixtures and the e2e suite's deliberate orphan
+charge — the report finding exactly what it is for.
+
+Walked in a browser as all five seeded accounts, no page errors and no 5xx on
+any screen:
+
+```
+PLATFORM_ADMIN  nav = Search | All bookings | Reconciliation   (no "Venue")
+                identity reads "every venue"; report renders 0 discrepancies
+VENUE_ADMIN A   nav = Search | My bookings | Venue   venue 94e12893
+VENUE_ADMIN B   nav = Search | My bookings | Venue   venue cdac14b6
+VENUE_STAFF A   same nav; reads settings, refused all three writes
+CUSTOMER        nav = Search | My bookings; identity reads "your own bookings"
+```
+
+The customer journey, end to end, with equipment: deep link to `/rooms/:id` with
+no query parameters renders the room's name, capacity, rate and
+`Asia/Karachi (UTC+05:00)`; the picker lists six equipment types with rate and
+units owned; hold, checkout, pay, CONFIRMED. The room screen offered 15:00 and
+checkout said `25 Aug 2026, 15:00 UTC+05:00` — one convention, labelled, on both
+screens.
+
+Cancelling a seeded CONFIRMED booking 339.7 hours out quoted **GBP 216.00, room
+100%, equipment 100%** against tiers `48:100 / 24:50 / 2:0 / 0:0` — the tier its
+start time falls into — and the booking moved to CANCELLED. The refund then
+could not settle, which is finding (7).
+
+Forcing an equipment shortfall through the UI, with a one-unit type created
+through `POST /venues/equipment-types` and the buffer at 10%:
+
+```
+Not enough equipment free in this window.
+P8 Solitary Mic — asked 1 · 1 already reserved at peak · ceiling 1 · short by 1
+```
+
+#### Not verified, and it is the one thing this phase cannot do
+
+**None of it is verified against the deployed instance, because none of it is
+deployed.** Checked directly: `GET /rooms/:id`, `GET /rooms/:id/equipment-types`
+and `GET /venues/settings` all answer 404 on
+`https://atrium-api-3p3j.onrender.com`, and a seeded CONFIRMED booking there
+still returns `policy_snapshot: null` with no `payment` and no `timezone` field
+— which is the exact state that was reported, so the diagnosis is confirmed at
+both ends.
+
+Deploying is a merge and a Render/Vercel action, and this repository's working
+agreement is that the human owns the remote. Until that happens, **Tier 1 is
+correct and tested but not deployed**, and the brief's rule means Tier 2 does not
+start.
