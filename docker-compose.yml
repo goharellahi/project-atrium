@@ -192,7 +192,19 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
       HOSTNAME: 0.0.0.0
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+      # `API_URL`, and `nginx` rather than `localhost`. Both halves were wrong
+      # and either one alone breaks the console completely.
+      #
+      # The name: this said NEXT_PUBLIC_API_BASE_URL, which nothing reads.
+      # `apps/web/lib/api.ts` consults API_URL then NEXT_PUBLIC_API_URL, so the
+      # console came up with no API configured at all.
+      #
+      # The host: every call the console makes is server-side, by design — the
+      # API sets no CORS headers, so a browser on the console's origin cannot
+      # reach it. `localhost:8080` inside this container is this container, not
+      # the load balancer. It has to be a name resolvable on the compose
+      # network, which is why it is the same `nginx:8080` Paygate calls back on.
+      API_URL: ${API_URL:-http://nginx:8080}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:
