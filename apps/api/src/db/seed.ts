@@ -1,4 +1,5 @@
 /* eslint-disable no-console */
+import { createHmac } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import { hash } from '@node-rs/argon2';
 import { fromLocalParts, toLocalParts, WEEKDAY_KEYS } from '../common/time/zoned-time';
@@ -182,6 +183,8 @@ export interface SeedSummary {
   venuePolicies: number;
   /** Settled bookings that were given a frozen cancellation policy. */
   snapshots: number;
+  /** What the provider was told, and whether it heard. */
+  paygate: { attempted: number; registered: number; skipped: string | null };
   payments: number;
   bookings: number;
   lineItems: number;
@@ -295,6 +298,14 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
   // bookings exist and after every policy row does. See seedPolicySnapshots.
   const snapshots = await seedPolicySnapshots(client);
 
+  // ...and Paygate's own record of the money, so a seeded booking's refund can
+  // actually settle. Last, because it reads the payments this run just wrote.
+  const paygate = await seedPaygate(
+    client,
+    process.env.PAYGATE_BASE_URL,
+    process.env.PAYGATE_SECRET,
+  );
+
   await client.query('ANALYZE');
 
   /**
@@ -324,6 +335,7 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
     policies,
     venuePolicies,
     snapshots,
+    paygate,
     payments: counted.payments,
     bookings: counted.bookings,
     lineItems: counted.booking_line_items,
@@ -598,35 +610,29 @@ async function seedPolicySnapshots(client: PoolClient): Promise<number> {
  * so a seeded booking is indistinguishable from one that went through Paygate
  * and `POST /bookings/:id/pay` on it is idempotent for the same reason.
  *
- * ## What these charges are NOT, said plainly
+ * ## These charges are registered with Paygate, and that is new in P8
  *
- * `ch_seed_<uuid>` is invented here. Paygate is a separate process with its own
- * store and has never heard of it, so a REFUND against a seeded charge is
- * rejected 404 `unknown_charge` and can never settle. Found in P8 by cancelling
- * a seeded CONFIRMED booking through the console: the refund is quoted
- * correctly, the cancellation succeeds, the booking becomes CANCELLED, the
- * refund key is minted — and the money never comes back, which
- * `GET /admin/reconciliation` then reports as `refund_initiated_not_settled`.
- * The report is right. The seed is what is lying.
+ * `ch_seed_<uuid>` is minted here, and it used to exist only here. Paygate is a
+ * separate process; it had never heard of these ids, so a refund against a
+ * seeded charge was rejected `404 unknown_charge` and could never settle.
  *
- * Three ways to make it true were considered and all three are worse:
+ * The first reading of that was "a seed problem", and it was not. Paygate held
+ * its whole ledger in memory, and the free tier sleeps after fifteen idle
+ * minutes — so a charge created through the console has exactly the same fate
+ * after one cold start. The seed was just where it surfaced first, because
+ * seeded charges were born already forgotten.
  *
- *   1. **Register every charge with Paygate.** 20,000 HTTP calls into a service
- *      that fails 10% of them on purpose, and whose store is in memory — one
- *      restart and the data is synthetic again.
- *   2. **Register only the cancellable ones.** Paygate mints its own charge
- *      ids, so the seed would have to write back whatever it returned; and
- *      every charge it accepts triggers a webhook to the API, which would try
- *      to CONFIRM bookings that are already CONFIRMED and fill the audit trail
- *      with illegal-transition errors. Seeding by side effect.
- *   3. **Special-case `ch_seed_` in the refund path.** A payment path that
- *      knows about seed data is a fail condition, not a shortcut.
+ * Paygate's ledger is durable now (`apps/paygate/src/ledger/`), so `seedPaygate`
+ * below hands these rows to it: one signed bulk import in batches, not twenty
+ * thousand HTTP charges. They are history to agree on rather than events to
+ * replay — they captured, this database already records that they captured, and
+ * the only thing ever missing was the provider's own row. Nothing is dispatched
+ * and no chaos plan is drawn.
  *
- * So the seed states the limitation instead of hiding it: it is printed at the
- * end of every run, it is in README's Known Issues, and the API now records the
- * provider's own rejection on the payment row so the reconciliation report can
- * say which kind of failure it found. A refund of a booking made through the
- * console settles for real; only seeded history cannot.
+ * What is deliberately NOT done: replaying them through `POST /paygate/charges`.
+ * The provider fails ten percent of those on purpose, and every one it accepts
+ * dispatches a webhook that would try to CONFIRM bookings already CONFIRMED,
+ * filling the audit trail with illegal transitions. Seeding by side effect.
  */
 async function seedPayments(client: PoolClient): Promise<number> {
   const inserted = await client.query(`
@@ -668,6 +674,127 @@ async function seedPayments(client: PoolClient): Promise<number> {
   `);
 
   return inserted.rowCount ?? 0;
+}
+
+/**
+ * Hand the seeded charges to Paygate's ledger.
+ *
+ * ## Why over HTTP and not straight into the tables
+ *
+ * The seed could write `paygate_charges` itself — the two services share one
+ * Postgres instance on every target this runs on. It does not, on purpose:
+ * knowing Paygate's table shape from inside `apps/api` is precisely the
+ * coupling that the separate schema, the separate migrations and the absent
+ * imports exist to prevent. A boundary that the seed is allowed to reach
+ * through is not a boundary.
+ *
+ * So it asks Paygate, and Paygate writes its own rows. `POST
+ * /paygate/_ledger/import` takes up to 2,000 charges per call, so the demo
+ * profile is about a dozen requests and the full profile about a hundred and
+ * thirty — not the twenty thousand that replaying them as real charges would
+ * cost, and none of them chaotic.
+ *
+ * ## Signed, because it has to work in production
+ *
+ * The `/paygate/_test/*` surface is unauthenticated and therefore refuses to
+ * register under NODE_ENV=production. This route authenticates with the same
+ * HMAC over the same raw bytes with the same shared secret that Paygate signs
+ * its webhooks with, so it can exist on the deployed instance — which is
+ * exactly where the demo data that needs it lives.
+ *
+ * ## When it cannot reach Paygate
+ *
+ * It says so and carries on. A seeded database with an unregistered ledger is
+ * still a working database for everything except refunding seeded history, and
+ * failing the whole seed over it would be worse. The summary reports what
+ * happened either way, so "the refund 404s" is never a mystery.
+ */
+async function seedPaygate(
+  client: PoolClient,
+  baseUrl: string | undefined,
+  secret: string | undefined,
+): Promise<{ attempted: number; registered: number; skipped: string | null }> {
+  if (!baseUrl || !secret) {
+    return {
+      attempted: 0,
+      registered: 0,
+      skipped:
+        'PAYGATE_BASE_URL and PAYGATE_SECRET are not both set, so seeded charges exist only in this database',
+    };
+  }
+
+  const { rows } = await client.query<{
+    id: string;
+    reference: string;
+    amount_minor: string;
+    currency: string;
+    idempotency_key: string;
+    status: string;
+    created_at: Date;
+    refunded_minor: string;
+  }>(`
+    SELECT p.charge_id AS id,
+           p.booking_id::text AS reference,
+           p.amount_minor::text AS amount_minor,
+           b.currency,
+           p.idempotency_key,
+           -- Every seeded payment captured. A REFUNDED one captured first and
+           -- was given back afterwards, which is refunded_minor, not a
+           -- different charge outcome.
+           'succeeded' AS status,
+           p.created_at,
+           p.refunded_minor::text AS refunded_minor
+      FROM payments p
+      JOIN bookings b ON b.id = p.booking_id
+     WHERE p.charge_id IS NOT NULL
+     ORDER BY p.created_at
+  `);
+
+  if (rows.length === 0) return { attempted: 0, registered: 0, skipped: null };
+
+  const url = `${baseUrl.replace(/\/+$/, '')}/paygate/_ledger/import`;
+  let registered = 0;
+
+  for (const batch of chunk(rows, 1_000)) {
+    const payload = JSON.stringify({
+      charges: batch.map((r) => ({
+        id: r.id,
+        reference: r.reference,
+        amount_minor: Number(r.amount_minor),
+        currency: r.currency,
+        idempotency_key: r.idempotency_key,
+        status: r.status,
+        created_at: r.created_at.toISOString(),
+        // A seeded charge settled the instant it was made. There is no delivery
+        // to wait for and nothing asynchronous about history.
+        occurred_at: r.created_at.toISOString(),
+        refunded_minor: Number(r.refunded_minor),
+      })),
+    });
+
+    // Signed over the exact bytes that go on the wire, never a re-serialised
+    // object — the same rule Paygate follows in the other direction.
+    const signature = createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-paygate-signature': signature },
+      body: payload,
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!response.ok) {
+      return {
+        attempted: rows.length,
+        registered,
+        skipped: `paygate answered ${response.status} ${await response.text()}`,
+      };
+    }
+
+    registered += ((await response.json()) as { written: number }).written;
+  }
+
+  return { attempted: rows.length, registered, skipped: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,12 +1689,21 @@ function report(s: SeedSummary): void {
   );
   console.log('  (counted from the tables, not tallied in memory)');
   console.log('');
-  console.log('  WARNING — seeded charges are synthetic. ch_seed_* exists in this database');
-  console.log('    and not at Paygate, so cancelling a SEEDED confirmed booking quotes the');
-  console.log('    right refund and then cannot settle it: the provider answers 404');
-  console.log('    unknown_charge, and reconciliation reports refund_initiated_not_settled,');
-  console.log('    correctly. Book through the console to exercise a refund end to end.');
-  console.log('    See seedPayments in this file for why, and for what was rejected.');
+
+  if (s.paygate.skipped) {
+    console.log('  WARNING — seeded charges were NOT registered with Paygate:');
+    console.log(`    ${s.paygate.skipped}`);
+    console.log('    They exist in this database and not at the provider, so cancelling a');
+    console.log('    SEEDED confirmed booking quotes the right refund and then cannot settle');
+    console.log('    it — the provider answers 404 unknown_charge and reconciliation reports');
+    console.log('    refund_initiated_not_settled, correctly. Set PAYGATE_BASE_URL and');
+    console.log('    PAYGATE_SECRET and re-run to fix it.');
+  } else {
+    console.log(
+      `  ${s.paygate.registered} of ${s.paygate.attempted} charges registered with Paygate's` +
+        ' ledger, so a seeded booking refunds for real',
+    );
+  }
 
   // Said out loud, every time, rather than left for someone to notice. A seed
   // that under-delivers silently is the exact failure P5 spent a phase finding.
