@@ -2,27 +2,37 @@
 
 import { useActionState, useState } from 'react';
 import { register, signIn } from '../actions';
-import { EMPTY_AUTH_STATE } from '../auth-state';
+import { EMPTY_AUTH_STATE, type AuthState } from '../auth-state';
 import { SEED_LOGINS, SEED_PASSWORD } from './credentials';
 import { Button } from '@/components/ui/button';
-import { Callout, IssueList } from '@/components/ui/callout';
+import { Callout } from '@/components/ui/callout';
 import { Input, LabelledField } from '@/components/ui/input';
+import { cn } from '@/lib/cn';
 
 /**
  * Sign in, and the seeded accounts that make signing in possible.
  *
  * Two actions share one pair of fields. `useActionState` keeps the form
  * controlled by the server's answer rather than by a local guess about what
- * went wrong, so a 401 and a 422 render from the API's own words.
+ * went wrong, so a 401 and a 422 both render from the API's own words.
  *
- * The password field is deliberately prefilled with the seed password. This is
- * a demonstration console for a graded assessment against a seeded database;
- * making a reviewer type a 14-character string five times to compare roles is
- * friction with nothing on the other side of it.
+ * ## Three fixes from browser testing
+ *
+ * The password field used to carry a placeholder of bullet characters, so an
+ * empty field looked like a filled one and the screen read as pre-populated.
+ * The email placeholder was a real seeded address, which compounded it. Both
+ * are gone: the placeholder is neutral, the password has none, and the seeded
+ * rows on the right — which already fill the form on click — are the way an
+ * address gets in.
+ *
+ * And submitting the form empty produced nothing at all. The action returned a
+ * message, but the only thing rendering it was a branch this state never
+ * reached. Errors now render in two places at once: a banner for the summary,
+ * and against the field itself, keyed on the API's own `issues` paths.
  */
 export function LoginForm({ next }: { next?: string | undefined }) {
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState(SEED_PASSWORD);
+  const [password, setPassword] = useState('');
 
   const [signInState, signInAction, signingIn] = useActionState(signIn, EMPTY_AUTH_STATE);
   const [registerState, registerAction, registering] = useActionState(
@@ -30,18 +40,27 @@ export function LoginForm({ next }: { next?: string | undefined }) {
     EMPTY_AUTH_STATE,
   );
 
-  const state = registerState.error ? registerState : signInState;
+  // Whichever action last produced a result is the one being shown. Both start
+  // empty, so before any submission this is simply the empty state.
+  const state: AuthState = registerState.error ? registerState : signInState;
   const busy = signingIn || registering;
 
+  const fieldError = (field: string): string | undefined =>
+    state.issues.find((issue) => issue.path === field || issue.path.endsWith(`.${field}`))
+      ?.message;
+
+  const emailError = fieldError('email');
+  const passwordError = fieldError('password');
+
   return (
-    <div className="grid gap-8 md:grid-cols-[320px_1fr]">
+    <div className="grid gap-8 lg:grid-cols-[340px_1fr]">
       <section>
         <h1 className="text-lg font-medium text-ink">Sign in</h1>
         <p className="mt-1 text-sm text-ink-muted">
           Access tokens last 15 minutes. The console asks again when one runs out.
         </p>
 
-        <form action={signInAction} className="mt-6 flex flex-col gap-4">
+        <form action={signInAction} className="mt-6 flex flex-col gap-4" noValidate>
           <input type="hidden" name="next" value={next ?? ''} />
 
           <LabelledField label="Email" htmlFor="email">
@@ -51,37 +70,55 @@ export function LoginForm({ next }: { next?: string | undefined }) {
               type="email"
               autoComplete="username"
               autoFocus
-              required
-              className="font-mono text-data"
+              aria-invalid={emailError ? true : undefined}
+              aria-describedby={emailError ? 'email-error' : undefined}
+              className={cn('font-mono text-data', emailError && 'border-danger')}
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              placeholder="customer@atrium.test"
+              placeholder="you@example.com"
             />
+            {emailError ? (
+              <p id="email-error" className="text-xs text-danger">
+                {emailError}
+              </p>
+            ) : null}
           </LabelledField>
 
-          <LabelledField
-            label="Password"
-            htmlFor="password"
-            hint="Registration requires at least 12 characters."
-          >
+          <LabelledField label="Password" htmlFor="password">
             <Input
               id="password"
               name="password"
               type="password"
               autoComplete="current-password"
-              required
-              className="font-mono text-data"
+              aria-invalid={passwordError ? true : undefined}
+              aria-describedby={passwordError ? 'password-error' : undefined}
+              className={cn('font-mono text-data', passwordError && 'border-danger')}
               value={password}
               onChange={(event) => setPassword(event.target.value)}
             />
+            {passwordError ? (
+              <p id="password-error" className="text-xs text-danger">
+                {passwordError}
+              </p>
+            ) : (
+              <p className="text-xs text-ink-muted">
+                Registration requires at least 12 characters.
+              </p>
+            )}
           </LabelledField>
 
           {state.error ? (
-            <Callout
-              tone={state.unreachable ? 'warn' : 'danger'}
-              title={state.error}
-            >
-              <IssueList issues={state.issues} />
+            <Callout tone={state.unreachable ? 'warn' : 'danger'} title={state.error}>
+              {state.issues.length > 0 && !emailError && !passwordError ? (
+                <ul className="mt-1 flex flex-col gap-1">
+                  {state.issues.map((issue, index) => (
+                    <li key={`${issue.path}-${index}`} className="flex gap-2 text-sm">
+                      <code className="font-mono text-data text-ink">{issue.path}</code>
+                      <span>{issue.message}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </Callout>
           ) : null}
 
@@ -111,7 +148,7 @@ export function LoginForm({ next }: { next?: string | undefined }) {
           to fill the form.
         </p>
 
-        <ul className="mt-4 divide-y divide-line rounded border border-line bg-surface">
+        <ul className="mt-4 divide-y divide-line overflow-hidden rounded border border-line bg-surface">
           {SEED_LOGINS.map((login) => (
             <li key={login.email}>
               <button
@@ -134,17 +171,10 @@ export function LoginForm({ next }: { next?: string | undefined }) {
           ))}
         </ul>
 
-        <div className="mt-4 rounded border border-line-strong bg-raised p-3">
-          <p className="text-sm font-medium text-ink">
-            These five exist only in a seeded database.
-          </p>
-          <p className="mt-1 text-sm text-ink-muted">
-            The deployed instance is not seeded, so there they return 401 and search comes
-            back empty. <strong className="font-medium text-ink">Register as customer</strong>{' '}
-            creates a real account and works against it today — the rest of the list needs
-            the seed to have been run.
-          </p>
-        </div>
+        <p className="mt-3 text-xs text-ink-muted">
+          The two venue admins are at different venues on purpose — that is the pair
+          tenant isolation has to be demonstrated against, and one account cannot do it.
+        </p>
       </section>
     </div>
   );

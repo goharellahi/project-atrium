@@ -33,8 +33,20 @@ export async function signIn(_previous: AuthState, formData: FormData): Promise<
   const password = String(formData.get('password') ?? '');
   const next = safeNext(formData.get('next'));
 
-  if (email === '' || password === '') {
-    return { error: 'Enter an email address and a password.', issues: [], unreachable: false };
+  // Reported as field issues as well as a banner, using the API's own path
+  // names, so the message lands against the control it is about. Previously
+  // this returned only `error` — and the form rendered nothing at all for it,
+  // because the banner was gated on a branch this state never reached.
+  const missing: { path: string; message: string }[] = [];
+  if (email === '') missing.push({ path: 'email', message: 'Enter an email address.' });
+  if (password === '') missing.push({ path: 'password', message: 'Enter a password.' });
+
+  if (missing.length > 0) {
+    return {
+      error: 'Enter an email address and a password.',
+      issues: missing,
+      unreachable: false,
+    };
   }
 
   try {
@@ -65,10 +77,20 @@ export async function register(_previous: AuthState, formData: FormData): Promis
   const email = String(formData.get('email') ?? '').trim();
   const password = String(formData.get('password') ?? '');
 
+  if (email === '') {
+    return {
+      error: 'Enter an email address.',
+      issues: [{ path: 'email', message: 'Enter an email address.' }],
+      unreachable: false,
+    };
+  }
+
   if (password.length < 12) {
     return {
       error: 'The API requires a password of at least 12 characters.',
-      issues: [],
+      issues: [
+        { path: 'password', message: 'At least 12 characters — the API enforces this.' },
+      ],
       unreachable: false,
     };
   }
