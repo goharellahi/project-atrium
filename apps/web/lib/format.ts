@@ -77,7 +77,57 @@ export function dayIn(iso: string, timeZone: string): string {
   }).format(new Date(iso));
 }
 
-/** UTC, spelled out. Used wherever no venue zone is in scope. */
+/**
+ * The short name of a zone at a given instant — `PKT`, `GMT+5`, `UTC`.
+ *
+ * At a given instant, because a zone's abbreviation is not a property of the
+ * zone: London is GMT in January and BST in July, and a label that ignored the
+ * date would be wrong for half the year.
+ */
+export function zoneLabel(iso: string, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    timeZoneName: 'short',
+  }).formatToParts(new Date(iso));
+
+  return parts.find((part) => part.type === 'timeZoneName')?.value ?? timeZone;
+}
+
+/**
+ * THE time convention for this console: the venue's local wall clock, always
+ * labelled with the zone it is in.
+ *
+ * ## Why one convention, and why this one
+ *
+ * P7 shipped two. The room page rendered slots in venue-local time — correctly,
+ * because "Tuesday 14:00" is the unit a person picks in — and checkout rendered
+ * the same slot in UTC, because the checkout screen had no timezone to hand.
+ * So the console told a customer in Karachi that the 14:00 slot they had just
+ * chosen was at 09:00, which is the most alarming thing a booking system can
+ * say. Neither screen was wrong on its own terms; together they were.
+ *
+ * Venue-local wins over UTC because the booking is an event in a building. The
+ * room opens at nine in the city it is in, not at 04:00Z, and a venue admin
+ * reading a schedule is standing in that city. UTC is the right thing to store
+ * and the wrong thing to show.
+ *
+ * The label is not optional. An unlabelled local time is how the two screens
+ * disagreed in the first place — both of them looked plausible.
+ *
+ * `GET /bookings`, `GET /bookings/:id`, `GET /rooms/:id` and
+ * `GET /rooms/:id/availability` all carry `timezone` for this reason. Where one
+ * genuinely is not in scope, `utc()` below is the labelled fallback rather than
+ * a silent guess at the reader's own zone.
+ */
+export function venueTime(iso: string, timeZone: string): string {
+  return `${dateTimeIn(iso, timeZone)} ${zoneLabel(iso, timeZone)}`;
+}
+
+/**
+ * UTC, spelled out. The fallback for the one case where no venue zone is in
+ * scope — not a second convention, but the same rule (always say which zone)
+ * applied when the answer is "we only know the instant".
+ */
 export function utc(iso: string): string {
   return `${new Intl.DateTimeFormat('en-GB', { ...DATE_TIME, timeZone: 'UTC' }).format(
     new Date(iso),
