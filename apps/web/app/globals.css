@@ -1,45 +1,264 @@
 @import "tailwindcss";
 
-/* ---------------------------------------------------------------------------
-   Design tokens. Tailwind 4 CSS-first configuration — there is no
-   tailwind.config.js. These values are fixed by DESIGN.md; change that file
-   first, then this one.
-   --------------------------------------------------------------------------- */
+/* ===========================================================================
+   Atrium operations console — design tokens.
+
+   Tailwind 4, configured CSS-first. There is deliberately no
+   tailwind.config.js; DESIGN.md is the source of truth and this file is its
+   only implementation.
+
+   Two namespaces are RESET to `initial` below — colour and type scale. That is
+   not tidiness. Clearing them deletes Tailwind's defaults from the build, so
+   `bg-zinc-100` and `text-2xl` are not merely discouraged here, they do not
+   compile. DESIGN.md says stone not zinc, one accent, and a six-step type
+   scale with nothing between; a rule the tooling enforces cannot drift the way
+   a rule in a document does.
+   =========================================================================== */
+
 @theme {
-  /* Neutral ramp: stone, not zinc. */
-  --color-bg: var(--color-stone-50);
-  --color-surface: #ffffff;
-  --color-border: var(--color-stone-200);
-  --color-fg: var(--color-stone-900);
-  --color-fg-muted: var(--color-stone-500);
+  /* ---- Colour ------------------------------------------------------------
+     Cleared, then rebuilt as a small semantic set. There is no ramp exposed to
+     markup: a component asks for `surface` or `ink-muted`, never for a number,
+     so a screen cannot accumulate greys by accident.
 
-  /* Single accent: amber. */
-  --color-accent: var(--color-amber-500);
-  --color-accent-fg: var(--color-stone-950);
+     Seven neutrals, and each has exactly one job — three surfaces (the page,
+     a panel, a header or hover), two rules (hairline, and the heavier one that
+     bounds a control), two inks (primary, secondary). Nothing on a screen may
+     invent an eighth, which is what the reset above enforces.               */
+  --color-*: initial;
 
-  /* 4px radius everywhere. */
-  --radius: 4px;
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-white: #ffffff;
 
-  /* Base 14px; 13px inside tables. */
-  --text-base: 0.875rem;
-  --text-table: 0.8125rem;
+  /* Stone, in oklch. Written out rather than referenced so that clearing the
+     namespace above cannot leave a dangling var. */
+  --color-canvas: oklch(0.985 0.001 106.423); /* stone-50  — the page */
+  --color-surface: #ffffff;                   /*            — panels, rows */
+  --color-raised: oklch(0.97 0.001 106.424);  /* stone-100 — table headers */
+  --color-ink: oklch(0.216 0.006 56.043);     /* stone-900 — primary text */
+  --color-ink-muted: oklch(0.553 0.013 58.071); /* stone-500 — secondary */
+  --color-ink-inverse: oklch(0.985 0.001 106.423);
 
-  /* Compact rows for an operations console. */
-  --spacing-row: 32px;
+  /* Borders are mixed against the canvas rather than hardcoded, so a hairline
+     over a panel and a hairline over the page are the same optical weight. */
+  --color-line: color-mix(in oklab, oklch(0.216 0.006 56.043) 12%, var(--color-canvas));
+  --color-line-strong: color-mix(in oklab, oklch(0.216 0.006 56.043) 22%, var(--color-canvas));
 
-  /* Data font — booking IDs, timestamps, money. */
+  /* One accent. Twice per screen at most: a primary action, and a live
+     indicator. */
+  --color-accent: oklch(0.769 0.188 70.08);   /* amber-500 */
+  --color-accent-deep: oklch(0.666 0.179 58.318); /* amber-600 — hover only */
+  --color-accent-wash: color-mix(in oklab, oklch(0.769 0.188 70.08) 12%, var(--color-surface));
+  --color-accent-ink: oklch(0.147 0.004 49.25);
+
+  /* A semantic negative, not a second accent. It appears only on states that
+     genuinely went wrong — FAILED, a refused charge — because an operator
+     scanning fifty rows has to find those without reading them. */
+  --color-danger: oklch(0.514 0.163 27.5);
+  --color-danger-wash: color-mix(in oklab, oklch(0.514 0.163 27.5) 8%, var(--color-surface));
+
+  /* ---- Type --------------------------------------------------------------
+     12 / 13 / 14 / 16 / 20 / 24. Nothing between, enforced by the reset. 14 is
+     the base; 13 is the table size and is named `data` because that is the
+     only place it is allowed.                                              */
+  --text-*: initial;
+
+  --text-xs: 0.75rem;      /* 12 */
+  --text-xs--line-height: 1.5;
+  --text-data: 0.8125rem;  /* 13 */
+  --text-data--line-height: 1.4;
+  --text-sm: 0.875rem;     /* 14 — base */
+  --text-sm--line-height: 1.5;
+  --text-md: 1rem;         /* 16 */
+  --text-md--line-height: 1.5;
+  --text-lg: 1.25rem;      /* 20 */
+  --text-lg--line-height: 1.2;
+  --text-lg--letter-spacing: -0.01em;
+  --text-xl: 1.5rem;       /* 24 */
+  --text-xl--line-height: 1.2;
+  --text-xl--letter-spacing: -0.01em;
+
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, SFMono-Regular, monospace;
 
-  /* Hairline borders, no card shadows. */
-  --shadow-card: none;
+  /* ---- Geometry ----------------------------------------------------------
+     4px radius everywhere, and one row height. 34px is the table row; it is a
+     token because a stray `h-9` in one table and `h-8` in another is exactly
+     the inconsistency nobody can name but everybody sees.                  */
+  --radius-*: initial;
+  --radius-none: 0px;
+  --radius-sm: 2px;
+  --radius: 4px;
+  --radius-full: 9999px; /* focus rings and the countdown bar cap only */
+
+  --spacing-row: 34px;
+  --spacing-header: 48px;
+
+  /* ---- Motion ------------------------------------------------------------
+     150ms for hover and state changes, 200ms for entrances. Ease-out both.
+     No spring, no bounce, no stagger.                                      */
+  --ease-out-quiet: cubic-bezier(0.2, 0, 0, 1);
+  --duration-state: 150ms;
+  --duration-enter: 200ms;
 }
 
-html {
-  font-size: 100%;
+/* ===========================================================================
+   Base
+
+   Wrapped in `@layer base`, and that is load bearing rather than tidy.
+
+   Tailwind 4 emits its utilities inside `@layer utilities`, and in the CSS
+   cascade an UNLAYERED rule beats every layered one regardless of specificity.
+   So a bare `*, *::before, *::after { border-color: … }` — the obvious way to
+   make a plain `border` come out as a hairline — silently defeats
+   `border-transparent`, `border-ink` and every other border colour utility in
+   the application. It cost a ghost button its invisible border before a
+   screenshot caught it.
+
+   Inside `@layer base` the same rule is the default it was meant to be, and any
+   utility overrides it.
+   =========================================================================== */
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    border-color: var(--color-line);
+  }
+
+  html {
+    font-size: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-sm);
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Every number in this application is tabular. A count that changes width as
+     it ticks is the single most obvious tell of an interface nobody looked at,
+     and the countdown on the checkout screen ticks once a second. */
+  .tabular,
+  .font-mono,
+  [class*="font-mono"],
+  input[type="number"],
+  th,
+  td {
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "tnum" 1;
+  }
+
+  /* A visible focus ring on everything, always. `:focus-visible` rather than
+     `:focus` so a mouse click on a button does not leave a ring behind, but a
+     keyboard tab does. Nothing in this codebase sets outline:none without one. */
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 2px;
+    border-radius: var(--radius);
+  }
+
+  ::selection {
+    background: var(--color-accent-wash);
+  }
+
+  /* Entrances. 200ms, ease-out, no stagger. */
+  @keyframes atrium-enter {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+
+  .enter {
+    animation: atrium-enter var(--duration-enter) var(--ease-out-quiet) both;
+  }
+
+  /* The skeleton pulse, and the delayed cold-start notice. Both are the only
+     things in the app that animate on their own. */
+  @keyframes atrium-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.45;
+    }
+  }
+
+  .skeleton {
+    background: var(--color-raised);
+    border-radius: var(--radius);
+    animation: atrium-pulse 1.4s var(--ease-out-quiet) infinite;
+  }
+
+  /* Render's free tier sleeps after 15 idle minutes. This notice is held back
+     for four seconds so a warm API never shows it, and appears without a layout
+     shift when the API is cold. CSS rather than a timer, so it costs nothing and
+     cannot leak. */
+  @keyframes atrium-reveal {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  .reveal-late {
+    opacity: 0;
+    animation: atrium-reveal var(--duration-enter) var(--ease-out-quiet) 4s forwards;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+
+    /* The late notice must still appear — it carries information. It simply
+       appears at once instead of fading in. */
+    .reveal-late {
+      opacity: 1;
+      animation: none;
+    }
+
+    .skeleton {
+      opacity: 0.7;
+    }
+  }
 }
 
-body {
-  background: var(--color-bg);
-  color: var(--color-fg);
-  font-size: var(--text-base);
+/* ===========================================================================
+   Utilities
+
+   Two of them, both about motion. Spelling the durations out at every call site
+   is how 150ms quietly becomes 200ms in one component and 120ms in another;
+   naming them once means the timing is a decision rather than a habit.
+   =========================================================================== */
+
+@utility transition-quiet {
+  transition-property: color, background-color, border-color, box-shadow, opacity;
+  transition-duration: var(--duration-state);
+  transition-timing-function: var(--ease-out-quiet);
+}
+
+@utility transition-enter {
+  transition-property: opacity, transform;
+  transition-duration: var(--duration-enter);
+  transition-timing-function: var(--ease-out-quiet);
 }

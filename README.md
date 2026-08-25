@@ -196,9 +196,17 @@ nginx/nginx.conf   round-robin LB over the three replicas
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
 
-**Current phase: P6 complete — performance, measured.** P6 and P7 swapped
-places: performance held the remaining Tier 1 risk, the console holds none of
-it.
+**Current phase: P7 complete — the operations console.** Six screens on
+`apps/web`: sign-in with the seeded role logins on the page, cross-venue search,
+room availability and hold, checkout with a live hold countdown and the chaotic
+payment path, my bookings with cancellation, and a read-only venue view.
+
+Building it found **an API defect that had been there since the endpoint was
+written**: `GET /search?amenity=…` answered 500 for every input, because Drizzle
+expanded the array into one placeholder per element and Postgres was handed
+`('wifi')::text[]`. It is fixed here, and `apps/api/src/search/search.amenity.test.ts`
+pins it against a real database — a unit test on the query builder would have
+passed either way, which is why it survived six phases with no test on it.
 
 The four endpoints the brief benchmarks were run against 250,000 bookings
 through the load balancer. **Three of the four p95 targets are met; create-hold
@@ -226,9 +234,18 @@ local compose stack.
 
 Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 
-- **Frontend.** `apps/web` is a placeholder page. P7.
 - **Venue administration.** Nothing writes `venues.overbooking_buffer_pct`, so
-  the room-side 422 for a non-zero buffer has no way to be triggered yet. P7.
+  the room-side 422 for a non-zero buffer still has no way to be triggered. It
+  was outside P7's six screens; P8.
+- **Revenue and utilisation page.** The API half landed in P6 and answers; there
+  is no screen rendering it. Outside P7's six screens; P8.
+- **Four API shapes the console had to work around.** There is no
+  `GET /rooms/:id` and `/search` cannot filter by id, so the room link carries
+  the room's name and rate; there is no customer-readable equipment catalogue,
+  so a customer can book equipment they cannot list; there is no refund preview,
+  so `apps/web/lib/refund.ts` re-implements the arithmetic and labels it a quote;
+  and the API sets no CORS headers, which is why every call the console makes is
+  server-side. All four are described in the P7 entry of [PLAN.md](PLAN.md).
 - **Create-hold's p95 is missed, and the miss is deliberate.** 536 ms against a
   250 ms target. The endpoint answers in 47 ms p95 in isolation, so it is starved
   rather than slow: three Node replicas pinned at one core each on a four-core

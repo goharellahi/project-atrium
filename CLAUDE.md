@@ -249,35 +249,41 @@ never be committed. Do not quote the brief at length in committed files.
 
 ## Current phase
 
-**P6 — performance, measured, on `feat/p6-performance`.** P6 and P7 swapped:
-performance held the remaining Tier 1 risk, the console holds none of it.
+**P7 — the operations console, on `feat/p7-frontend`.** Six screens on
+`apps/web`: sign-in with the seeded role logins on the page, cross-venue search,
+room availability and hold, checkout with a live hold countdown and the chaotic
+payment path, my bookings with cancellation, and a read-only venue view.
 
-The `full` profile is real now — 250,000 bookings over 24 months, evenly spread,
-counted from the tables rather than tallied in memory. Three indexes were added
-because a plan changed, two deleted, and **two built and rejected**; the
-rejections are in `ARCHITECTURE.md` §5 and are the more useful half. Three of the
-four benchmarked p95 targets are met; create-hold misses at 536 ms against 250 ms
-and the cause is measured, not guessed (`LOAD_TEST.md` §5). `ARCHITECTURE.md` §8
-is grounded in plans captured by widening real queries until they saw 100×
-density, rather than in arithmetic.
+The visual contract in `DESIGN.md` is enforced by the build, not by discipline:
+the Tailwind colour and type-scale namespaces are reset to `initial` in
+`app/globals.css`, so `bg-zinc-100` and `text-2xl` do not compile.
 
-Both P5 gaps are closed: the 200-request proof holds at 250,000 rows over three
-consecutive runs, and the correlation id is now assertable because
-`webhook_deliveries.correlation_id` gives it somewhere to be observed.
+**Every API call the console makes is server-side**, because the API sets no
+CORS headers and a browser on the Vercel origin cannot reach it at all. Server
+components read, server actions write, and one route handler exists for the one
+thing the browser must poll — the booking whose webhook has not landed. The
+access token therefore lives in an httpOnly cookie and is never reachable from
+client JavaScript. Do not move a call into the browser without adding CORS to
+`apps/api` first.
 
-P6 found four defects in work already believed finished — a seed whose totals
-were right and whose distribution made the benchmark meaningless, a stride
-losing 46 rows to floating point, and two tests in P5's own suite that passed for
-the wrong reasons. Read the P6 entry in `PLAN.md` before trusting a number that
-has not been re-run.
+P7 found four defects. One had never worked: **`GET /search?amenity=…` answered
+500 for every input**, because Drizzle expands a bare JS array in a `sql`
+template into one placeholder per element. Fixed with `sql.param`, and pinned by
+`apps/api/src/search/search.amenity.test.ts`. The trap is the same one
+`uuidArray` in `bookings/equipment-availability.ts` documents — if you interpolate
+an array into a `sql` template anywhere, bind it as one parameter. The other
+three were in the console and all three passed `tsc` and `next build` cleanly:
+a `'use server'` module may only export async functions, an unlayered base rule
+beats `@layer utilities` regardless of specificity, and a `datetime-local` round
+trip shifts by the reader's UTC offset. Read the P7 entry in `PLAN.md`.
 
-Create-hold's missed p95 is **accepted and published, not outstanding work** —
-the reasoning is DECISIONS.md 12. Do not re-open it by tuning; the one thing that
-would change it is a run on a box where the replicas are not CPU-bound.
+Four API shapes the console had to work around are recorded there rather than
+fixed: no `GET /rooms/:id`, no customer-readable equipment catalogue, no refund
+preview endpoint, and no CORS.
 
-Next: **P7 — the frontend**, per `DESIGN.md`. Still open: CI runs only the
-offline tests, and the rooms-reject-non-zero-overbooking-buffer 422 from P2 waits
-on the venue administration screen.
+Next: **P8 — the final documents**. Still open: CI runs only the offline tests;
+the rooms-reject-non-zero-overbooking-buffer 422 from P2 still waits on a venue
+administration screen; and the revenue report has an API but no page.
 
 See `PLAN.md` for the full phase list and the progress log.
 

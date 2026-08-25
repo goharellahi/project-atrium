@@ -242,17 +242,63 @@ integrity work lands separately once the booking core exists.
 
 ## P7 — Frontend · `feat/p7-frontend`
 
-- [ ] Console per `DESIGN.md` — rooms, equipment, pricing, policy
-- [ ] Booking flow: search, hold, checkout, confirmation
+Six screens, in the priority order the phase was scoped in. All six shipped.
+
+- [x] Design system per `DESIGN.md` — stone, one amber accent, 4px radius,
+      hairlines, no card shadows, mono for ids/timestamps/money, 13px tables.
+      Tailwind 4 CSS-first, and the colour and type-scale namespaces are **reset
+      to `initial`** so `bg-zinc-100` and `text-2xl` do not compile rather than
+      merely being discouraged
+- [x] Login, with the five seeded role logins on the page and a one-click fill,
+      plus registration — which is the only way into the *deployed* instance,
+      because its database is not seeded
+- [x] Search — city, minimum capacity, amenities, price ceiling and an
+      availability window, all combinable, all in the URL, rendered as a dense
+      table with a sticky header and stable column widths
+- [x] Room detail — availability over a date range, slots grouped by venue-local
+      day, slot selection, and optional equipment line items
+- [x] Checkout — hold with a live countdown, an explicit extend, pay, and
+      distinct terminal states for confirmed, failed and expired. The pending
+      state polls and stops after three minutes rather than spinning forever
+- [x] My bookings — list, filter, detail, cancel, with the refund quoted
+      *before* the customer confirms
+- [x] Staff view — bookings for the venue on the token, read only
 - [ ] Revenue and utilisation report per venue over a date range — the API half
-      landed in P6; this is the page that renders it
+      landed in P6. **Not built**; out of this phase's six screens
 - [ ] Venue administration, including the overbooking buffer — which is what
-      unblocks the rooms-reject-non-zero-buffer 422 still open from P2
+      unblocks the rooms-reject-non-zero-buffer 422 still open from P2.
+      **Not built**; out of this phase's six screens
 - [ ] Availability returns busy intervals and the client enumerates slots.
       Deferred here from P6 on purpose: it is the cheapest measured performance
       win left (73 MB of the benchmark's 86 MB is availability payload) but it
-      changes the console's data contract, and designing that shape before the
-      console exists means designing for a consumer nobody has written.
+      changes the console's data contract. **Not taken** — the console now
+      exists, so the shape can finally be designed for a consumer that is
+      written, and doing it in the same phase as the console would have meant
+      designing and consuming the contract in one motion with nothing to check
+      it against
+
+### Follow-ups this phase opened
+
+The console was scoped to `apps/web`. The one item below that is a *defect*
+rather than a missing shape was fixed here anyway, because shipping a console
+whose search screen 500s on a filter the brief requires is not a boundary worth
+keeping. The rest are recorded, not fixed:
+
+- [x] **`GET /search?amenity=…` was 500 for every input.** Fixed, with a
+      database-backed regression test that fails without the fix. Root cause in
+      the progress entry below.
+- **No `GET /rooms/:id`.** `/search` cannot filter by id, so a room's name,
+  venue and rate cannot be fetched for a room already chosen. The console
+  carries them on the link instead and degrades to the id on a bare deep link.
+- **No customer-readable equipment catalogue.** `GET /equipment-types` is staff
+  only, `POST /bookings/hold` accepts line items from anyone, so a customer can
+  book equipment but cannot discover it.
+- **No refund preview endpoint.** The brief requires the refund be shown before
+  the customer confirms; the API computes it inside the cancellation
+  transaction. `apps/web/lib/refund.ts` re-implements the arithmetic exactly
+  and is labelled as a quote.
+- **No CORS headers.** The browser cannot reach the API directly at all, which
+  is why every call in the console is server-side.
 
 ---
 
@@ -876,3 +922,146 @@ only evidence — an invariant you cannot check is one you no longer know you ha
 **Not done:** `apps/web` was untouched, deliberately and per instruction. The
 rooms-reject-non-zero-overbooking-buffer 422 is still open from P2 and now
 depends on the venue administration screen, which is P7.
+
+---
+
+### 2026-08-24 — P7 complete (the operations console)
+
+Six screens on `apps/web`, plus one `apps/api` line and the test that pins it.
+Paygate, the schema and the deployment files were not touched.
+
+The phase's useful output is not the screens. It is four defects — one in the
+API that no test covered and that had never worked, and three in the console
+that typecheck and `next build` both passed clean and that only a browser could
+find.
+
+---
+
+**`GET /search?amenity=…` returns 500 for every input.** Not a slow path, not an
+edge case: `?amenity=wifi` is a 500, and so is every combination containing an
+amenity. The brief names amenities as one of the combinable search filters, so
+this is a required filter that has never worked.
+
+The cause was in `apps/api/src/search/search.service.ts`:
+
+```ts
+${rooms.amenities} @> ${query.amenity}::text[]        // before
+${rooms.amenities} @> ${sql.param(query.amenity)}::text[]   // after
+```
+
+Drizzle expands a bare JS array in a `sql` template into one placeholder per
+element, so the predicate compiled to `@> ($1)::text[]` bound to the *string*
+`wifi`, and Postgres answered `22P02 malformed array literal: "wifi"`.
+`sql.param` binds the array as one parameter and lets the driver encode it.
+
+The repository already knew about this trap. `uuidArray` in
+`bookings/equipment-availability.ts` exists for exactly it, and its doc comment
+describes the same `malformed array literal` failure — the hold path hit it
+first. The search endpoint simply never got the same treatment. Both call sites
+in that file were re-checked while fixing this; the second one is correct, and
+the amenity predicate was the only remaining instance in `apps/api`.
+
+Amenities are free text off a query string, so the fix binds the array rather
+than building a literal the way `uuidArray` does: there is no literal to escape,
+and a value containing `{` or `,` is data instead of syntax. There is a test for
+that case.
+
+**It survived six phases because nothing tested it.** No amenity case anywhere
+in `tests/`, and the endpoint's own coverage exercised city, capacity and price.
+`apps/api/src/search/search.amenity.test.ts` now covers it: it builds its own
+venue and rooms, asserts that containment is AND rather than OR, that an unknown
+amenity returns zero rows instead of throwing, that the repeated and
+comma-separated forms agree, and that array punctuation in a value is data. All
+six cases fail with `malformed array literal` against the old binding.
+
+It is a database-backed suite on purpose. A unit test against the query builder
+would have passed just as happily with the broken binding, since the predicate,
+the operator and the shape were all correct — only Postgres could tell you. It
+skips when `DATABASE_URL` is absent, and CI provisions one and applies the
+migrations, so it runs there.
+
+The UI does not work around it. It renders the API's own message, and a 5xx now
+says in one line that the failure is the server's rather than the filter's,
+because a reviewer looking at "Internal server error" under a filter they just
+typed will otherwise assume the console broke.
+
+---
+
+**Three console defects that neither `tsc` nor `next build` could see.**
+
+*Every action file exported a constant, and every one of them would have thrown
+at runtime.* A `'use server'` module may only export async functions. Exporting
+`EMPTY_PAY_STATE` beside `payForBooking` type-checks, builds, and then fails the
+moment a client component imports it — `A "use server" file can only export
+async functions, found object`. All four action files did this. The console
+would have shipped with sign-in, hold, pay and cancel all dead, from a build
+with no warnings in it. The constants now live in sibling `*-state.ts` modules.
+
+*The base stylesheet was silently overriding every border-colour utility.*
+`*, *::before, *::after { border-color: var(--color-line) }` is the obvious way
+to make a bare `border` come out as a hairline. Written unlayered, it beats
+Tailwind's `@layer utilities` **regardless of specificity** — so
+`border-transparent` did nothing, and every ghost button in the application had
+a visible grey box around it. `@layer base` fixes it. Nothing reported this; a
+screenshot did.
+
+*A `datetime-local` round trip shifted the search window by the reader's UTC
+offset.* The availability filter renders on the server, which does not know the
+reader's zone; writing an instant into the input as UTC and then reading it back
+as local moved the window by the offset every time a filtered link was reopened.
+The two window fields are now populated after hydration, where the zone is
+known, and are the only fields in the console that are.
+
+---
+
+**Why every API call is server-side.** The API sets no
+`Access-Control-Allow-Origin` — checked against the deployed instance rather
+than assumed — so a browser on the Vercel origin cannot call it at all. Enabling
+CORS is an `apps/api` change and this phase does not touch `apps/api`. Server
+components read, server actions write, and exactly one route handler exists, for
+the one thing the browser genuinely must poll: the booking whose webhook has not
+landed yet.
+
+The constraint bought the better design anyway. The access token lives in an
+httpOnly cookie and is attached on the server, so no bearer token is ever
+serialised into HTML or reachable from client JavaScript.
+
+**Two shapes the API does not provide, and how the console handles not having
+them.** There is no `GET /rooms/:id` and `/search` cannot filter by id, so the
+room detail link carries the room's name, venue and rate as query parameters and
+the page degrades to showing the id when they are absent. And there is no refund
+preview, so `lib/refund.ts` re-implements the API's arithmetic — BigInt on minor
+units, truncating division, lead time clamped at zero — and labels the result a
+quote against the clock. Both were checked against the API on a real booking with
+equipment on it: the console quoted PKR 48.00 room, PKR 192.00 equipment,
+PKR 240.00 total, and the cancellation returned exactly those three numbers.
+
+**The equipment gap is shown, not hidden.** `GET /equipment-types` is staff-only
+and `POST /bookings/hold` accepts line items from anyone, so a customer can book
+equipment they cannot list. Staff get a picker; everyone else gets a field for an
+id and a sentence saying why there is no list. A third case exists and is
+separate on purpose: a venue account looking at *another* venue's room is told
+the tenant boundary is holding, because an empty picker there would say the venue
+owns no equipment when it owns plenty.
+
+**What was verified, and how.** Local Postgres 16, the API and Paygate built and
+run with chaos on, the `demo` profile seeded, and the console driven through
+Chromium end to end: sign in, search, room, hold, pay, confirm, list, cancel.
+The 502 branch fired on its own during the walkthrough and rendered as designed —
+the API's own message, the accent-bordered "in flight" tone rather than a red
+one, and copy telling the customer to press the button again because the
+idempotency key is derived from the booking id. Tenant isolation was checked
+through the console: a VENUE_ADMIN of venue B opening a venue A booking gets the
+404 page, a VENUE_STAFF sees 3,479 bookings and a PLATFORM_ADMIN sees 25,003.
+
+The amenity fix was verified the same way: the six new cases red against the old
+binding and green against the new one, then the rebuilt API queried directly
+(20 rooms with `wifi`, 10 with `wifi` and `blackout`, 0 with `helipad`, and the
+combined query reporting all three filters applied), then the same query through
+the console, which now renders rows where it rendered the API's 500.
+
+**Not verified.** The deployed instance's booking flow. Its database is not
+seeded, so search there returns nothing and there is no room to hold. Everything
+above was proven against a local stack with the same code; the deployed
+*read* paths, the cold-start behaviour and the empty and error states were
+checked against the deployed API directly. Seeding it is a human action.
