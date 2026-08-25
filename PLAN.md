@@ -263,6 +263,14 @@ Six screens, in the priority order the phase was scoped in. All six shipped.
 - [x] My bookings — list, filter, detail, cancel, with the refund quoted
       *before* the customer confirms
 - [x] Staff view — bookings for the venue on the token, read only
+- [x] A real application shell — persistent sidebar carrying the product mark,
+      navigation, and the signed-in identity with its role and venue; a page
+      header on every screen; chrome and content on different stone tones
+      separated by a hairline *(added after browser review; see the second P7
+      entry below)*
+- [x] The deployed instance seeded to the demo volume with the five test logins
+      — `SEED_ON_BOOT`, guarded so it can only ever run against a database with
+      no venues in it
 - [ ] Revenue and utilisation report per venue over a date range — the API half
       landed in P6. **Not built**; out of this phase's six screens
 - [ ] Venue administration, including the overbooking buffer — which is what
@@ -1065,3 +1073,186 @@ seeded, so search there returns nothing and there is no room to hold. Everything
 above was proven against a local stack with the same code; the deployed
 *read* paths, the cold-start behaviour and the empty and error states were
 checked against the deployed API directly. Seeding it is a human action.
+
+---
+
+### 2026-08-25 — P7, second pass (deployed, and made to read as a product)
+
+The console was complete and the deployed instance was hollow. Testing it in a
+browser rather than trusting a green build found one blocker, six defects and a
+structural problem, in that order of cost.
+
+---
+
+**The deployed database was empty, and that is a deliverable, not a detail.**
+Search reported no rooms, four of the five accounts the login screen advertises
+did not exist, and hold, checkout, payment, cancellation and the staff view were
+all unreachable. A reviewer could see three screens and none of the system.
+
+Worse than empty: `admin@atrium.test` *did* exist, as a CUSTOMER, created
+through the console's own register button — which by design only ever mints a
+CUSTOMER. So the email the seed needs for PLATFORM_ADMIN was squatted, and a
+plain seed run would have hit `users_email_unique` and aborted.
+
+Render's free tier has no shell, no exec and no one-off jobs, so the only
+process that can reach that database is the API. Three options were weighed:
+
+- **Seed from a laptop against the deployed `DATABASE_URL`.** Safest in the
+  abstract — no destructive code ever ships — but it requires the production
+  connection string to travel, which is a worse exposure than the alternative.
+- **An unguarded boot-time seed.** Indefensible. The seed TRUNCATEs before it
+  inserts and a free-tier service restarts every time it wakes from sleep, so
+  this wipes the database several times a day.
+- **A boot-time seed that refuses to run against a database with data in it.**
+  Chosen.
+
+`SEED_ON_BOOT=demo|full|off` runs the seed only when `venues` is empty. That
+table is the right sentinel because nothing in the running application can
+insert into it — there is no venue-creation endpoint — so "has a venue" means
+"has been seeded" and cannot drift. Once seeded it is a permanent no-op, which
+is what makes leaving the flag set harmless rather than a countdown to data
+loss. A failed seed logs and the API still serves; a replica that refuses to
+start is harder to diagnose than one that tells you why.
+
+It was proved both ways against a throwaway database before going anywhere near
+the deployed one:
+
+```
+empty db  + SEED_ON_BOOT=demo   -> seeded: 8 venues, 60 rooms, 400 users,
+                                   25,000 bookings, platform policy row present
+seeded db + SEED_ON_BOOT=demo   -> "already has venues — skipping"
+                                   booking-id fingerprint byte-identical before
+                                   and after
+```
+
+The platform cancellation-policy row is the specific thing P5 found the seed
+destroying. It survives because the seed puts it back inside the same run, and
+the fingerprint check above is what confirms the guard never reaches the data.
+
+Two supporting changes: `runSeed` is exported from `db/seed.ts`, and the CLI's
+`main()` is now behind `require.main === module` — without that guard, importing
+the seed to call it would have truncated the database as a side effect of
+loading a module, before any flag had been read.
+
+---
+
+**Six defects found in a browser, none of which a build could see.**
+
+*The active nav item was wrong, and the cause was not the one it looked like.*
+On `/bookings`, "Search" stayed underlined. The obvious diagnosis — the
+`x-atrium-path` header from `proxy.ts` not arriving — was wrong. Measured:
+
+```
+hard load /search            Search active       ✓
+click through to /bookings   Search STILL active ✗
+hard reload /bookings        My bookings active  ✓
+```
+
+The third line proves the header arrives intact. A **shared layout is not
+re-rendered when the router navigates between its own children** — that is what
+lets a layout hold state across navigation — so `active` was computed once, on
+the first server render, and never again. The header was never the problem; the
+consumer was. `usePathname` is therefore the correct answer rather than a
+workaround, and it is confined to a 60-line client component so the rest of the
+shell stays on the server. `proxy.ts` was deleted, because nothing consumed it
+any more.
+
+*The password placeholder was a string of bullets*, so an empty field looked
+filled and the screen read as pre-populated. *The email placeholder was a real
+seeded address*, compounding it. Both gone; the seeded rows already fill the
+form on click, and that is now the only way an address gets in.
+
+*Submitting the form empty rendered nothing at all.* The action returned "Enter
+an email address and a password" and the only branch that could display it was
+one this state never reached. Errors now render twice — a banner for the
+summary, and against the field itself, keyed on the API's own `issues` paths, so
+a 422 from the API lands on the control it is about.
+
+*The availability window was two raw `datetime-local` inputs*, rendered by the
+browser as `mm/dd/yyyy --:-- --` in its own typography with an OS-drawn picker
+no token reaches. Replaced with a `date` input plus a select over the API's own
+30-minute grid — which is strictly more useful than free text, because the hold
+endpoint 422s anything off that grid, so free text can only offer a way to be
+wrong.
+
+*The status filter was a native `<select>`*, the one element whose popup the
+operating system drew. Replaced on Radix, and the native `Select` export was
+**deleted** rather than deprecated so nothing can quietly regress to it.
+
+---
+
+**The timezone round trip, tested rather than assumed.**
+
+The instruction was explicit: show it, do not claim it. Conversion now lives in
+two pure functions in `lib/wall-clock.ts` with no `Date` string parsing in them
+— `new Date("…T14:30")` is local and `new Date("…T14:30Z")` is UTC and the
+difference is one character, which is not a distinction to leave to a reader.
+
+Proved at two levels. `wall-clock.test.ts` runs under five zones (`pnpm --filter
+web test` sets `TZ` per run), including a half-hour offset and two DST zones,
+and asserts on the exact instant. Reintroducing the original defect — reading
+the instant back with `getUTCHours` instead of `getHours` — makes it fail
+exactly where it should:
+
+```
+TZ=UTC            5 passed          (the reason the bug was invisible)
+TZ=Asia/Karachi   2 failed          2026-01-15 00:00 came back as 2026-01-14 19:00
+```
+
+Then in a real browser, four timezones, same wall clock typed into the actual
+control:
+
+```
+UTC               typed 09:00→17:00  sent 09:00Z → 17:00Z
+Asia/Karachi      typed 09:00→17:00  sent 04:00Z → 12:00Z
+Asia/Kolkata      typed 09:00→17:00  sent 03:30Z → 11:30Z   (half-hour offset)
+America/New_York  typed 09:00→17:00  sent 13:00Z → 21:00Z   (DST)
+```
+
+The computed instants are also printed under the filter bar, so the reader can
+see what will be sent before sending it.
+
+---
+
+**The shell was the honest problem, and it was structural.**
+
+Every screen was one flat full-width column under a thin bare header: no page
+structure, no navigation with weight, no separation between chrome and content.
+Tokens were applied — mono, uppercase labels, the amber accent — and tokens
+alone do not make a product.
+
+Now: a persistent 240px sidebar carrying the mark, the navigation and the
+signed-in identity; a page header on every screen with title, one line of
+context and that screen's single primary action; and three stone tones with one
+job each — `raised` for chrome, `canvas` for the page, `surface` for panels —
+divided by hairlines rather than shadows. Below `lg` the sidebar becomes a
+horizontal band, because a fixed 240px column on a phone is an obstruction.
+
+Role and venue are now permanently visible in the sidebar rather than squeezed
+into a corner, which for a multi-tenant console is load-bearing information.
+The venue shows as a short id, not a name — **a fifth missing read endpoint**:
+`/auth/me` returns `venueId` only, and the sole place a venue's name appears is
+inside the revenue report, which runs four aggregates and demands a date range.
+Spending that on a label is the wrong trade.
+
+---
+
+**Verified end to end, locally, across all five roles.**
+
+```
+CUSTOMER      search on 3 combined filters -> 7 rows; slot held; countdown
+              ticking 07:59 -> 07:57; chaotic provider refused once and the
+              retry confirmed; refund quoted before confirming and the API's
+              settlement agreed
+VENUE_STAFF   3,480 bookings, venue-scoped, zero action controls (read-only)
+VENUE_ADMIN A 3,480 bookings   venue 96301680
+VENUE_ADMIN B 3,535 bookings   venue 807032fa
+              B opening one of A's bookings by direct id -> the 404 page
+PLATFORM_ADMIN 25,008 bookings (all venues)
+```
+
+**Not verified: the same walk against the deployed instance.** It cannot be, yet
+— the deployed database is still empty, and seeding it needs `SEED_ON_BOOT=demo`
+set on the Render service and a redeploy, which is a dashboard action. The
+mechanism is built and proved; the deployed run is the step after it. That is
+the one part of this phase that is finished in code and unfinished in fact.
