@@ -38,14 +38,46 @@ export function amount(minor: string | bigint): string {
   return money(minor, '').trim();
 }
 
-const DATE_TIME: Intl.DateTimeFormatOptions = {
-  year: 'numeric',
-  month: 'short',
-  day: '2-digit',
-  hour: '2-digit',
-  minute: '2-digit',
-  hour12: false,
-};
+/**
+ * The fields of an instant in a named zone, as a record.
+ *
+ * ## Why every formatter below assembles its own string
+ *
+ * `Intl.DateTimeFormat(...).format()` decides the punctuation, and the
+ * punctuation is not stable across ICU versions. Node 26 renders `en-GB`
+ * weekday-day-month as `Tue 25 Aug`; Chrome renders `Tue, 25 Aug`. Both are
+ * correct for their ICU, and the difference is one comma.
+ *
+ * That comma cost the room screen its hydration. `groupByDay` runs inside a
+ * client component, so the server rendered the label with Node's ICU, React
+ * compared it to Chrome's on hydration, found different text, and threw away
+ * and re-rendered the whole availability tree — silently in production, as
+ * minified error #418. Found in P8 by reading the console in a browser; it had
+ * been there since the screen was written.
+ *
+ * `formatToParts` returns the FIELDS rather than a rendered string, and the
+ * fields are what ICU agrees on. Assembling them here means these functions
+ * produce the same characters on both sides of the hydration boundary, on any
+ * runtime, and it also means the format is ours to choose rather than a locale
+ * database's to change under us.
+ *
+ * `hourCycle: 'h23'` and not `hour12: false`: the latter is ambiguous between
+ * h23 and h24, so midnight renders as `00` on one runtime and `24` on another —
+ * the same class of bug, one field over.
+ */
+function fieldsIn(
+  iso: string,
+  timeZone: string,
+  options: Intl.DateTimeFormatOptions,
+): Record<string, string> {
+  const parts = new Intl.DateTimeFormat('en-GB', { ...options, timeZone }).formatToParts(
+    new Date(iso),
+  );
+
+  const fields: Record<string, string> = {};
+  for (const part of parts) if (part.type !== 'literal') fields[part.type] = part.value;
+  return fields;
+}
 
 /**
  * An instant, rendered in a named IANA zone.
@@ -56,41 +88,88 @@ const DATE_TIME: Intl.DateTimeFormatOptions = {
  * with somebody eventually.
  */
 export function dateTimeIn(iso: string, timeZone: string): string {
-  return new Intl.DateTimeFormat('en-GB', { ...DATE_TIME, timeZone }).format(new Date(iso));
+  const f = fieldsIn(iso, timeZone, {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  });
+  return `${f.day} ${f.month} ${f.year}, ${f.hour}:${f.minute}`;
 }
 
 export function timeIn(iso: string, timeZone: string): string {
-  return new Intl.DateTimeFormat('en-GB', {
+  const f = fieldsIn(iso, timeZone, {
     hour: '2-digit',
     minute: '2-digit',
-    hour12: false,
-    timeZone,
-  }).format(new Date(iso));
+    hourCycle: 'h23',
+  });
+  return `${f.hour}:${f.minute}`;
 }
 
 export function dayIn(iso: string, timeZone: string): string {
-  return new Intl.DateTimeFormat('en-GB', {
+  const f = fieldsIn(iso, timeZone, {
     weekday: 'short',
     day: '2-digit',
     month: 'short',
-    timeZone,
-  }).format(new Date(iso));
+  });
+  return `${f.weekday} ${f.day} ${f.month}`;
 }
 
 /**
- * The short name of a zone at a given instant — `PKT`, `GMT+5`, `UTC`.
+ * A zone's offset at a given instant — `UTC+05:00`, `UTC+01:00`, `UTC`.
  *
- * At a given instant, because a zone's abbreviation is not a property of the
- * zone: London is GMT in January and BST in July, and a label that ignored the
- * date would be wrong for half the year.
+ * At a given instant, because an offset is not a property of a zone: London is
+ * UTC+00:00 in January and UTC+01:00 in July, and a label that ignored the date
+ * would be wrong for half the year.
+ *
+ * ## Why the offset and not `PKT` / `BST`
+ *
+ * `timeZoneName: 'short'` is the obvious way to get an abbreviation and it is
+ * ICU's opinion, which differs between runtimes — the same trap `fieldsIn`
+ * exists for, and this string is rendered inside client components. An offset
+ * computed from the parts is arithmetic rather than a lookup, so it is the same
+ * everywhere. It is also less ambiguous: `PKT` means nothing to most readers,
+ * and `CST` means three different things.
+ *
+ * The IANA name is shown beside it wherever this appears, so the pair names
+ * both the zone and what it currently amounts to.
  */
 export function zoneLabel(iso: string, timeZone: string): string {
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone,
-    timeZoneName: 'short',
-  }).formatToParts(new Date(iso));
+  const at = new Date(iso);
+  const f = fieldsIn(iso, timeZone, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  });
 
-  return parts.find((part) => part.type === 'timeZoneName')?.value ?? timeZone;
+  // The same wall clock read as if it were UTC. The difference between that and
+  // the real instant IS the offset — no table, no abbreviation, no ICU opinion.
+  const asUtc = Date.UTC(
+    Number(f.year),
+    Number(f.month) - 1,
+    Number(f.day),
+    Number(f.hour),
+    Number(f.minute),
+    Number(f.second),
+  );
+
+  // Seconds are dropped from the instant for the same reason they are dropped
+  // from every other display: no zone in current use has a sub-minute offset,
+  // and keeping them would make a rounding artefact look like one.
+  const offsetMinutes = Math.round((asUtc - at.getTime()) / 60_000);
+  if (offsetMinutes === 0) return 'UTC';
+
+  const sign = offsetMinutes < 0 ? '-' : '+';
+  const abs = Math.abs(offsetMinutes);
+  const hours = String(Math.floor(abs / 60)).padStart(2, '0');
+  const minutes = String(abs % 60).padStart(2, '0');
+  return `UTC${sign}${hours}:${minutes}`;
 }
 
 /**
@@ -129,9 +208,7 @@ export function venueTime(iso: string, timeZone: string): string {
  * applied when the answer is "we only know the instant".
  */
 export function utc(iso: string): string {
-  return `${new Intl.DateTimeFormat('en-GB', { ...DATE_TIME, timeZone: 'UTC' }).format(
-    new Date(iso),
-  )} UTC`;
+  return `${dateTimeIn(iso, 'UTC')} UTC`;
 }
 
 /** `mm:ss`, zero padded so the width never changes as it counts down. */
