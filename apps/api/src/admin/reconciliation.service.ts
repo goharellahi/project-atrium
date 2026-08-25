@@ -44,6 +44,11 @@ export interface Discrepancy extends Record<string, unknown> {
  *      reached. **refund_accepted_not_settled** is its milder sibling: the
  *      provider accepted the refund and never reported settlement, which is
  *      what a lost webhook looks like.
+ *      **charge_accepted_not_settled** is the same shape one step earlier: the
+ *      provider issued a charge id and no outcome was ever recorded. Added in
+ *      P8, because its absence is what let an amnesiac provider hide money —
+ *      the poll asked, was told "never heard of it", read that as "nothing was
+ *      captured", and no check disagreed.
  *   6. **over_refunded** — more went back than came in.
  *   7. **unmatched_delivery** — a signed delivery still unapplied past the
  *      grace window, including the `unknown_charge` case. The provider says it
@@ -140,7 +145,7 @@ export class ReconciliationService {
     };
   }
 
-  /** The seven checks, as one composable fragment so it can be counted and listed. */
+  /** The eight checks, as one composable fragment so it can be counted and listed. */
   private discrepancies(from: Date, to: Date, graceSeconds: number) {
     const grace = sql.raw(`interval '${Math.max(0, Math.floor(graceSeconds))} seconds'`);
 
@@ -257,6 +262,35 @@ export class ReconciliationService {
            AND updated_at < now() - ${grace}
       ),
 
+      -- 5c. the provider accepted a CHARGE and never told us it settled.
+      --
+      -- Added in P8, and its absence was load bearing. The refund side has been
+      -- covered by refund_accepted_not_settled above since P4; the charge side
+      -- had no class at all, so a payment that sat PENDING forever with a
+      -- provider charge id against it was invisible to this report.
+      --
+      -- That is precisely the state an amnesiac provider produced. The API
+      -- polls for a lost outcome, the provider — having been restarted —
+      -- answers "never heard of it", and the poll used to read that as "nothing
+      -- was captured" and move on. Nothing was captured does not follow from
+      -- nothing is remembered: we are holding a charge id the provider issued,
+      -- which is evidence that something happened to somebody's money.
+      --
+      -- Paygate's ledger is durable now, so a 404 here is a genuine
+      -- disagreement rather than a shrug. Either way it belongs on this report.
+      charge_accepted_not_settled AS (
+        SELECT 'charge_accepted_not_settled' AS kind,
+               booking_id, charge_id, amount_minor::text AS amount_minor,
+               'the provider accepted charge ' || charge_id
+                 || ' and no outcome has been recorded'
+                 || COALESCE(' (' || failure_reason || ')', '') AS detail,
+               updated_at AS observed_at
+          FROM settled
+         WHERE status = 'PENDING'
+           AND charge_id IS NOT NULL
+           AND updated_at < now() - ${grace}
+      ),
+
       -- 6. more went back than came in.
       over_refunded AS (
         SELECT 'over_refunded' AS kind,
@@ -290,6 +324,7 @@ export class ReconciliationService {
       UNION ALL SELECT * FROM refund_without_capture
       UNION ALL SELECT * FROM refund_initiated_not_settled
       UNION ALL SELECT * FROM refund_accepted_not_settled
+      UNION ALL SELECT * FROM charge_accepted_not_settled
       UNION ALL SELECT * FROM over_refunded
       UNION ALL SELECT * FROM unmatched_delivery
     `;

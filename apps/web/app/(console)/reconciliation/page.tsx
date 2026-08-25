@@ -28,7 +28,7 @@ export const metadata: Metadata = { title: 'Reconciliation · Atrium' };
  *
  * Every other screen in this console is more useful when it has rows. This one
  * is the opposite: an empty table is the claim being upheld. So the headline is
- * the count and the seven checks are named whether or not any of them fired —
+ * the count and all nine checks are named whether or not any of them fired —
  * a report that renders nothing when nothing is wrong is indistinguishable from
  * a report that is broken, and this one exists precisely to be trusted.
  *
@@ -57,11 +57,11 @@ interface Reconciliation {
 }
 
 /**
- * The seven checks, in the order the service documents them.
+ * The nine checks, in the order the service documents them.
  *
  * Listed here rather than derived from `by_kind`, deliberately: `by_kind` only
  * carries the kinds that fired, so a screen built from it would show nothing on
- * a healthy platform and could never say "all seven checks ran and found
+ * a healthy platform and could never say "all nine checks ran and found
  * nothing". The one thing this page must be able to say is exactly that.
  */
 const CHECKS: { kind: string; label: string; means: string }[] = [
@@ -94,6 +94,12 @@ const CHECKS: { kind: string; label: string; means: string }[] = [
     kind: 'refund_accepted_not_settled',
     label: 'Refund accepted, never settled',
     means: 'The provider took the refund and never reported it. This is what a lost webhook looks like.',
+  },
+  {
+    kind: 'charge_accepted_not_settled',
+    label: 'Charge accepted, never settled',
+    means:
+      'The provider issued a charge id and no outcome was ever recorded. Added in P8 — its absence is how an amnesiac provider hid money.',
   },
   {
     kind: 'over_refunded',
@@ -195,7 +201,7 @@ export default async function ReconciliationPage({
 
       {clean ? (
         <Callout tone="info" title="Zero discrepancies in this window.">
-          All eight checks ran and none fired. That is the claim INV-5 makes, and an
+          All nine checks ran and none fired. That is the claim INV-5 makes, and an
           empty table is what upholding it looks like — the checks below say what each
           one was looking for.
         </Callout>
