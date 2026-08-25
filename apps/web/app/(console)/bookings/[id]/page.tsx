@@ -140,7 +140,11 @@ export default async function BookingPage({
             </Panel>
           ) : null}
 
-          <PaymentPanel payment={booking.payment} currency={booking.currency} />
+          <PaymentPanel
+            payment={booking.payment}
+            currency={booking.currency}
+            timezone={booking.timezone}
+          />
 
           <Panel>
             <PanelHeader>

@@ -1,5 +1,5 @@
 import { Panel, PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel';
-import { money, shortId, utc } from '@/lib/format';
+import { money, shortId, venueTime } from '@/lib/format';
 import type { BookingPayment } from '@/lib/types';
 
 /**
@@ -28,9 +28,12 @@ import type { BookingPayment } from '@/lib/types';
 export function PaymentPanel({
   payment,
   currency,
+  timezone,
 }: {
   payment: BookingPayment | null;
   currency: string;
+  /** The venue's zone. One convention on this screen, including for money. */
+  timezone: string;
 }) {
   if (!payment) {
     return (
@@ -68,7 +71,7 @@ export function PaymentPanel({
           {payment.refund_id ? (
             <Pair label="Refund id" value={payment.refund_id} />
           ) : null}
-          <Pair label="Settled at" value={utc(payment.updated_at)} />
+          <Pair label="Settled at" value={venueTime(payment.updated_at, timezone)} />
           <Pair label="Payment id" value={shortId(payment.payment_id)} />
         </dl>
 

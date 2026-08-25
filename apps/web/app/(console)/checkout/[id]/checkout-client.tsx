@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Callout } from '@/components/ui/callout';
 import { Panel, PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel';
 import { Status } from '@/components/ui/status';
-import { money, utc } from '@/lib/format';
+import { money, venueTime } from '@/lib/format';
 import type { Booking } from '@/lib/types';
 import { extendHold, payForBooking } from './actions';
 import { EMPTY_EXTEND_STATE, EMPTY_PAY_STATE, type PayState } from './pay-state';
@@ -141,9 +141,17 @@ export function CheckoutClient({
           <PanelBody>
             <dl className="grid gap-4 sm:grid-cols-2">
               <Pair label="Booking id" value={booking.id} mono />
-              <Pair label="Room id" value={booking.room_id} mono />
-              <Pair label="Starts" value={utc(booking.starts_at)} mono />
-              <Pair label="Ends" value={utc(booking.ends_at)} mono />
+              <Pair label="Room" value={booking.room_name ?? booking.room_id} />
+              <Pair
+                label="Starts"
+                value={venueTime(booking.starts_at, booking.timezone)}
+                mono
+              />
+              <Pair
+                label="Ends"
+                value={venueTime(booking.ends_at, booking.timezone)}
+                mono
+              />
               <Pair label="Total" value={money(booking.total_minor, booking.currency)} mono />
               <Pair
                 label="Extensions used"
