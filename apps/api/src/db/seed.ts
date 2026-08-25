@@ -597,6 +597,36 @@ async function seedPolicySnapshots(client: PoolClient): Promise<number> {
  * Keys and ids follow the same derivation the live path uses (`charge:<booking>`),
  * so a seeded booking is indistinguishable from one that went through Paygate
  * and `POST /bookings/:id/pay` on it is idempotent for the same reason.
+ *
+ * ## What these charges are NOT, said plainly
+ *
+ * `ch_seed_<uuid>` is invented here. Paygate is a separate process with its own
+ * store and has never heard of it, so a REFUND against a seeded charge is
+ * rejected 404 `unknown_charge` and can never settle. Found in P8 by cancelling
+ * a seeded CONFIRMED booking through the console: the refund is quoted
+ * correctly, the cancellation succeeds, the booking becomes CANCELLED, the
+ * refund key is minted — and the money never comes back, which
+ * `GET /admin/reconciliation` then reports as `refund_initiated_not_settled`.
+ * The report is right. The seed is what is lying.
+ *
+ * Three ways to make it true were considered and all three are worse:
+ *
+ *   1. **Register every charge with Paygate.** 20,000 HTTP calls into a service
+ *      that fails 10% of them on purpose, and whose store is in memory — one
+ *      restart and the data is synthetic again.
+ *   2. **Register only the cancellable ones.** Paygate mints its own charge
+ *      ids, so the seed would have to write back whatever it returned; and
+ *      every charge it accepts triggers a webhook to the API, which would try
+ *      to CONFIRM bookings that are already CONFIRMED and fill the audit trail
+ *      with illegal-transition errors. Seeding by side effect.
+ *   3. **Special-case `ch_seed_` in the refund path.** A payment path that
+ *      knows about seed data is a fail condition, not a shortcut.
+ *
+ * So the seed states the limitation instead of hiding it: it is printed at the
+ * end of every run, it is in README's Known Issues, and the API now records the
+ * provider's own rejection on the payment row so the reconciliation report can
+ * say which kind of failure it found. A refund of a booking made through the
+ * console settles for real; only seeded history cannot.
  */
 async function seedPayments(client: PoolClient): Promise<number> {
   const inserted = await client.query(`
@@ -1531,6 +1561,13 @@ function report(s: SeedSummary): void {
       `overrides) · ${s.snapshots} settled bookings carry a frozen snapshot`,
   );
   console.log('  (counted from the tables, not tallied in memory)');
+  console.log('');
+  console.log('  WARNING — seeded charges are synthetic. ch_seed_* exists in this database');
+  console.log('    and not at Paygate, so cancelling a SEEDED confirmed booking quotes the');
+  console.log('    right refund and then cannot settle it: the provider answers 404');
+  console.log('    unknown_charge, and reconciliation reports refund_initiated_not_settled,');
+  console.log('    correctly. Book through the console to exercise a refund end to end.');
+  console.log('    See seedPayments in this file for why, and for what was rejected.');
 
   // Said out loud, every time, rather than left for someone to notice. A seed
   // that under-delivers silently is the exact failure P5 spent a phase finding.

@@ -736,14 +736,43 @@ export class PaymentsService {
       // The key is already persisted, so this is recoverable: the reconciler
       // reports a captured charge whose refund never settled, and a retry with
       // the same key cannot double-refund.
+      const message = err instanceof Error ? err.message : String(err);
+
       log().error(
         {
           bookingId: instruction.bookingId,
           chargeId: instruction.chargeId,
-          err: err instanceof Error ? err.message : String(err),
+          err: message,
         },
         'payment.refund.failed',
       );
+
+      /**
+       * Write the reason down, added in P8.
+       *
+       * Until now a rejected refund existed only as a log line. The payment row
+       * showed `refunded_minor: 0` and a refund key with no refund id, the
+       * console showed a dash, and the reconciliation report reported
+       * `refund_initiated_not_settled` — all correct, and none of them able to
+       * say WHY. "The provider was never reached" and "the provider answered
+       * 404, this charge does not exist" are different problems with different
+       * fixes, and an operator staring at the report could not tell them apart.
+       *
+       * P8 found the second one by cancelling a seeded booking: the seed
+       * synthesises `ch_seed_<uuid>` charge ids for its captured payments, and
+       * Paygate — a separate process with its own store — has never heard of
+       * them. See `seedPayments` for why the seed cannot make them real, and
+       * README's Known Issues for what that means for a reviewer.
+       *
+       * Not fatal, and deliberately not rethrown: the refund key is persisted,
+       * so a retry converges on the same refund, and the reconciler is the
+       * place this is meant to surface.
+       */
+      await this.db
+        .update(payments)
+        .set({ failureReason: `refund rejected: ${message}`, updatedAt: new Date() })
+        .where(eq(payments.id, instruction.paymentId))
+        .catch(() => undefined);
     }
   }
 
