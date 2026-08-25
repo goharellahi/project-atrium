@@ -9,6 +9,7 @@ import { PoliciesModule } from './policies/policies.module';
 import { EquipmentModule } from './equipment/equipment.module';
 import { AdminModule } from './admin/admin.module';
 import { ReportsModule } from './reports/reports.module';
+import { VenuesModule } from './venues/venues.module';
 import { CorrelationMiddleware } from './common/context/correlation.middleware';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -34,6 +35,7 @@ import { VenueScopeGuard } from './common/guards/venue-scope.guard';
     EquipmentModule,
     AdminModule,
     ReportsModule,
+    VenuesModule,
   ],
   providers: [
     { provide: APP_GUARD, useClass: JwtAuthGuard },
