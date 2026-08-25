@@ -54,7 +54,21 @@ export async function requireUser(returnTo?: string): Promise<Me> {
   }
 }
 
-/** Roles that see venue-wide data rather than their own bookings. */
+/**
+ * Roles that see more than their own bookings.
+ *
+ * Note what this does NOT answer: whether the account has a venue. A
+ * PLATFORM_ADMIN sees every booking on the platform and has no venue at all, so
+ * using this to decide whether to show a *venue* screen produced a "Venue" nav
+ * item for a user who does not have one. That is what `hasVenueScope` is for,
+ * and the two are different questions that happened to have the same answer for
+ * two of the four roles.
+ */
 export function isStaff(role: Me['role']): boolean {
   return role === 'VENUE_ADMIN' || role === 'VENUE_STAFF' || role === 'PLATFORM_ADMIN';
+}
+
+/** Roles whose token carries a venue, and which therefore have a venue to look at. */
+export function hasVenueScope(role: Me['role']): boolean {
+  return role === 'VENUE_ADMIN' || role === 'VENUE_STAFF';
 }
