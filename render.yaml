@@ -112,6 +112,13 @@ services:
         value: render-1
       - key: RUN_MIGRATIONS_ON_BOOT
         value: "true"
+      # Seeds the demo profile once, and only against a database with no venues
+      # in it — see `seedOnBootIfUnseeded` in apps/api/src/main.ts. Left "off"
+      # here deliberately: turning it on is a deliberate act in the dashboard,
+      # not something a redeploy of this file does on somebody's behalf. Once a
+      # database is seeded the flag is a permanent no-op and is safe to leave.
+      - key: SEED_ON_BOOT
+        value: "off"
       - key: DATABASE_URL
         fromDatabase:
           name: atrium-db

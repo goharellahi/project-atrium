@@ -171,7 +171,7 @@ const pad = (n: number): string => String(n).padStart(2, '0');
 // Entry point
 // ---------------------------------------------------------------------------
 
-interface SeedSummary {
+export interface SeedSummary {
   profile: string;
   venues: number;
   rooms: number;
@@ -189,30 +189,44 @@ interface SeedSummary {
   elapsedSeconds: number;
 }
 
-async function main(): Promise<void> {
-  const profileArg =
-    process.argv.find((a) => a.startsWith('--profile='))?.split('=')[1] ?? 'demo';
-
-  const profile = PROFILES[profileArg];
+/**
+ * Run a profile against a database URL. The CLI and the boot-time path both
+ * come through here, so there is exactly one seeding implementation.
+ *
+ * Exported because Render's free tier has no shell: the only way to seed the
+ * deployed database is from inside the process that can already reach it. See
+ * `seedOnBootIfUnseeded` in `main.ts` for the guard that makes that safe.
+ */
+export async function runSeed(
+  profileName: string,
+  databaseUrl: string,
+): Promise<SeedSummary> {
+  const profile = PROFILES[profileName];
   if (!profile) {
     throw new Error(
-      `Unknown profile "${profileArg}". Expected one of: ${Object.keys(PROFILES).join(', ')}`,
+      `Unknown profile "${profileName}". Expected one of: ${Object.keys(PROFILES).join(', ')}`,
     );
   }
-
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!databaseUrl) throw new Error('DATABASE_URL is required');
 
   const pool = new Pool({ connectionString: databaseUrl, max: 1 });
   const client = await pool.connect();
 
   try {
-    const summary = await seed(client, profile);
-    report(summary);
+    return await seed(client, profile);
   } finally {
     client.release();
     await pool.end();
   }
+}
+
+async function main(): Promise<void> {
+  const profileArg =
+    process.argv.find((a) => a.startsWith('--profile='))?.split('=')[1] ?? 'demo';
+
+  const databaseUrl = process.env.DATABASE_URL;
+  if (!databaseUrl) throw new Error('DATABASE_URL is required');
+
+  report(await runSeed(profileArg, databaseUrl));
 }
 
 const SEED_PASSWORD = 'AtriumDemo123!';
@@ -1342,7 +1356,17 @@ function report(s: SeedSummary): void {
   console.log('');
 }
 
-main().catch((err: unknown) => {
-  console.error(`seed failed: ${err instanceof Error ? err.stack : String(err)}`);
-  process.exit(1);
-});
+/**
+ * Only when this file IS the process, never when it is imported.
+ *
+ * Without the guard, `import { runSeed } from './db/seed'` in the API's
+ * bootstrap would truncate the database as a side effect of loading a module —
+ * at import time, before any flag had been read. `nest build` emits CommonJS,
+ * so `require.main` is the reliable test here.
+ */
+if (require.main === module) {
+  main().catch((err: unknown) => {
+    console.error(`seed failed: ${err instanceof Error ? err.stack : String(err)}`);
+    process.exit(1);
+  });
+}
