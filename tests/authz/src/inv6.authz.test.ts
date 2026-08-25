@@ -266,6 +266,69 @@ describe('public catalogue routes carry no tenant data', () => {
     ]);
   });
 
+  it('GET /rooms/:id for B is readable and carries only catalogue fields', async () => {
+    recordProbe('GET /rooms/:id');
+    const probe = await call('GET', `/rooms/${world.b.roomId}`, world.a.admin);
+
+    // Deliberately readable across venues — it is one row of the catalogue
+    // `/search` already publishes, and a room the catalogue advertises cannot
+    // become secret when addressed by its own id. See CROSS_VENUE_BY_DESIGN.
+    expect(probe.status).toBe(200);
+    expect((probe.json as { id: string }).id).toBe(world.b.roomId);
+
+    // The projection is the assertion. Nothing about B's customers, bookings or
+    // staff may ride along, and no operational figure may appear here later
+    // without this failing first.
+    assertNoLeak(probe, [
+      world.b.bookingId,
+      world.b.heldBookingId,
+      world.b.customer.userId,
+      world.b.customer.email,
+      world.b.admin.email,
+    ]);
+    for (const forbidden of ['revenue', 'utilisation', 'utilization', 'occupancy']) {
+      expect(probe.text.toLowerCase()).not.toContain(forbidden);
+    }
+  });
+
+  it('GET /rooms/:id/equipment-types is readable by a CUSTOMER and leaks nothing operational', async () => {
+    recordProbe('GET /rooms/:id/equipment-types');
+
+    // The role that actually books. Until P8 this list did not exist and
+    // `GET /equipment-types` answered a customer 403, so equipment line items
+    // were unreachable through the UI by the only role that can use them.
+    const probe = await call('GET', `/rooms/${world.b.roomId}/equipment-types`, world.a.customer);
+    expect(probe.status).toBe(200);
+
+    const body = probe.json as {
+      data: { id: string; name: string; units_owned: number; hourly_rate_minor: string }[];
+    };
+    expect(body.data.some((row) => row.id === world.b.equipmentTypeId)).toBe(true);
+
+    // Exactly four keys. A fifth is the failure this test exists for: peak
+    // usage, how many are out right now, or anything a competitor could poll.
+    for (const row of body.data) {
+      expect(Object.keys(row).sort()).toEqual([
+        'hourly_rate_minor',
+        'id',
+        'name',
+        'units_owned',
+        'venue_id',
+      ]);
+    }
+
+    assertNoLeak(probe, [
+      world.b.bookingId,
+      world.b.heldBookingId,
+      world.b.customer.userId,
+      world.b.customer.email,
+      world.b.admin.email,
+    ]);
+    for (const forbidden of ['peak', 'in_use', 'reserved', 'revenue', 'utilis', 'utiliz']) {
+      expect(probe.text.toLowerCase()).not.toContain(forbidden);
+    }
+  });
+
   it('GET /search returns rooms across venues but no booking or customer identifiers', async () => {
     recordProbe('GET /search');
     const probe = await call('GET', '/search?city=' + encodeURIComponent(`authz-inv6-B`), world.a.admin);
@@ -277,6 +340,225 @@ describe('public catalogue routes carry no tenant data', () => {
       world.b.customer.email,
       world.b.admin.email,
     ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Venue administration — writes, which is where isolation actually costs money
+// ---------------------------------------------------------------------------
+
+describe('venue administration is scoped to the token venue', () => {
+  it('GET /venues/settings returns the caller venue and never another', async () => {
+    recordProbe('GET /venues/settings');
+
+    const probe = await call('GET', '/venues/settings', world.a.admin);
+    expect(probe.status).toBe(200);
+    expect((probe.json as { id: string }).id).toBe(world.a.venueId);
+    assertNoLeak(probe, secretsOf(world.b));
+
+    // A PLATFORM_ADMIN has no venue on their token, so there is nothing to
+    // administer through this route. Refused rather than given a guess.
+    const platform = await call('GET', '/venues/settings', world.platformAdmin);
+    expect([403, 404]).toContain(platform.status);
+  });
+
+  it('PATCH /venues/settings by A cannot touch B, even naming B in the body', async () => {
+    recordProbe('PATCH /venues/settings');
+
+    const beforeB = await db.query<{ pct: number; name: string }>(
+      `SELECT overbooking_buffer_pct AS pct, name FROM venues WHERE id = $1::uuid`,
+      [world.b.venueId],
+    );
+
+    // `venue_id` and `id` are not parameters of this endpoint. Sending them is
+    // the attack: the only acceptable outcomes are ignored or rejected, never
+    // honoured. There is no check to forget because there is nothing to check.
+    const written = await call('PATCH', '/venues/settings', world.a.admin, {
+      venue_id: world.b.venueId,
+      id: world.b.venueId,
+      overbooking_buffer_pct: 7,
+      name: 'renamed by the wrong tenant',
+    });
+    expect(written.status).toBe(200);
+    expect((written.json as { id: string }).id).toBe(world.a.venueId);
+
+    // Read the row back. A write that was "denied" but still landed would pass
+    // every status assertion above.
+    const afterB = await db.query<{ pct: number; name: string }>(
+      `SELECT overbooking_buffer_pct AS pct, name FROM venues WHERE id = $1::uuid`,
+      [world.b.venueId],
+    );
+    expect(afterB.rows[0]).toEqual(beforeB.rows[0]);
+
+    const afterA = await db.query<{ pct: number }>(
+      `SELECT overbooking_buffer_pct AS pct FROM venues WHERE id = $1::uuid`,
+      [world.a.venueId],
+    );
+    expect(afterA.rows[0]!.pct).toBe(7);
+  });
+
+  it('the buffer is capped at 10% and a room may not carry one at all', async () => {
+    const tooHigh = await call('PATCH', '/venues/settings', world.a.admin, {
+      overbooking_buffer_pct: 40,
+    });
+    expect(tooHigh.status).toBe(422);
+
+    const stored = await db.query<{ pct: number }>(
+      `SELECT overbooking_buffer_pct AS pct FROM venues WHERE id = $1::uuid`,
+      [world.a.venueId],
+    );
+    expect(stored.rows[0]!.pct).toBeLessThanOrEqual(10);
+
+    // The P2 rule that had never run against a real request: a room is one
+    // physical space, so a buffer on it would violate INV-1 directly.
+    const onARoom = await call('POST', '/venues/rooms', world.a.admin, {
+      name: 'buffered room',
+      capacity: 4,
+      hourly_rate_minor: '5000',
+      overbooking_buffer_pct: 5,
+    });
+    expect(onARoom.status).toBe(422);
+    expect(onARoom.text).toContain('INV-1');
+
+    const created = await db.query(
+      `SELECT 1 FROM rooms WHERE venue_id = $1::uuid AND name = 'buffered room'`,
+      [world.a.venueId],
+    );
+    expect(created.rowCount).toBe(0);
+  });
+
+  it('GET /venues/rooms lists only the caller venue rooms', async () => {
+    recordProbe('GET /venues/rooms');
+    const probe = await call('GET', '/venues/rooms', world.a.admin);
+    expect(probe.status).toBe(200);
+
+    const body = probe.json as { data: { id: string; venue_id: string }[] };
+    expect(body.data.length).toBeGreaterThan(0);
+    expect(body.data.every((row) => row.venue_id === world.a.venueId)).toBe(true);
+    assertNoLeak(probe, [world.b.roomId, world.b.venueId]);
+  });
+
+  it('POST /venues/rooms writes to the token venue, whatever the body claims', async () => {
+    recordProbe('POST /venues/rooms');
+
+    const name = `census room ${Date.now()}`;
+    const probe = await call('POST', '/venues/rooms', world.a.admin, {
+      venue_id: world.b.venueId,
+      name,
+      capacity: 8,
+      hourly_rate_minor: '12345',
+      amenities: ['wifi'],
+    });
+    expect([200, 201]).toContain(probe.status);
+    expect((probe.json as { venue_id: string }).venue_id).toBe(world.a.venueId);
+
+    const row = await db.query<{ venue_id: string }>(
+      `SELECT venue_id FROM rooms WHERE name = $1`,
+      [name],
+    );
+    expect(row.rows).toHaveLength(1);
+    expect(row.rows[0]!.venue_id).toBe(world.a.venueId);
+  });
+
+  it('PATCH /venues/rooms/:id of B by A is refused and changes nothing', async () => {
+    recordProbe('PATCH /venues/rooms/:id');
+
+    const before = await db.query<{ name: string; rate: string }>(
+      `SELECT name, hourly_rate_minor::text AS rate FROM rooms WHERE id = $1::uuid`,
+      [world.b.roomId],
+    );
+
+    const probe = await call('PATCH', `/venues/rooms/${world.b.roomId}`, world.a.admin, {
+      name: 'repriced by the wrong tenant',
+      hourly_rate_minor: '1',
+    });
+    expectDenied(probe, world.b);
+
+    const after = await db.query<{ name: string; rate: string }>(
+      `SELECT name, hourly_rate_minor::text AS rate FROM rooms WHERE id = $1::uuid`,
+      [world.b.roomId],
+    );
+    expect(after.rows[0]).toEqual(before.rows[0]);
+  });
+
+  it('POST /venues/equipment-types writes to the token venue, whatever the body claims', async () => {
+    recordProbe('POST /venues/equipment-types');
+
+    const name = `census camera ${Date.now()}`;
+    const probe = await call('POST', '/venues/equipment-types', world.a.admin, {
+      venue_id: world.b.venueId,
+      name,
+      hourly_rate_minor: '4000',
+      units_owned: 3,
+    });
+    expect([200, 201]).toContain(probe.status);
+    expect((probe.json as { venue_id: string }).venue_id).toBe(world.a.venueId);
+
+    const row = await db.query<{ venue_id: string }>(
+      `SELECT venue_id FROM equipment_types WHERE name = $1`,
+      [name],
+    );
+    expect(row.rows).toHaveLength(1);
+    expect(row.rows[0]!.venue_id).toBe(world.a.venueId);
+  });
+
+  it('PATCH /venues/equipment-types/:id of B by A is refused and changes nothing', async () => {
+    recordProbe('PATCH /venues/equipment-types/:id');
+
+    const before = await db.query<{ units: number; rate: string }>(
+      `SELECT units_owned AS units, hourly_rate_minor::text AS rate
+         FROM equipment_types WHERE id = $1::uuid`,
+      [world.b.equipmentTypeId],
+    );
+
+    const probe = await call(
+      'PATCH',
+      `/venues/equipment-types/${world.b.equipmentTypeId}`,
+      world.a.admin,
+      { units_owned: 999, hourly_rate_minor: '1' },
+    );
+    expectDenied(probe, world.b);
+
+    const after = await db.query<{ units: number; rate: string }>(
+      `SELECT units_owned AS units, hourly_rate_minor::text AS rate
+         FROM equipment_types WHERE id = $1::uuid`,
+      [world.b.equipmentTypeId],
+    );
+    expect(after.rows[0]).toEqual(before.rows[0]);
+  });
+
+  it('a VENUE_STAFF may read the settings but not write them', async () => {
+    const read = await call('GET', '/venues/settings', world.a.staff);
+    expect(read.status).toBe(200);
+
+    // Staff run the desk. What the venue charges, when it opens and how much
+    // inventory it claims to own is an owner's decision.
+    for (const [method, path, body] of [
+      ['PATCH', '/venues/settings', { overbooking_buffer_pct: 0 }],
+      ['POST', '/venues/rooms', { name: 'staff room', capacity: 2, hourly_rate_minor: '100' }],
+      ['POST', '/venues/equipment-types', { name: 'staff kit', hourly_rate_minor: '100', units_owned: 1 }],
+    ] as const) {
+      const probe = await call(method, path, world.a.staff, body);
+      expect([403, 404]).toContain(probe.status);
+    }
+
+    const leaked = await db.query(
+      `SELECT 1 FROM rooms WHERE venue_id = $1::uuid AND name = 'staff room'`,
+      [world.a.venueId],
+    );
+    expect(leaked.rowCount).toBe(0);
+  });
+
+  it('a CUSTOMER cannot reach venue administration at all', async () => {
+    for (const [method, path] of [
+      ['GET', '/venues/settings'],
+      ['PATCH', '/venues/settings'],
+      ['GET', '/venues/rooms'],
+      ['POST', '/venues/rooms'],
+    ] as const) {
+      const probe = await call(method, path, world.a.customer, { overbooking_buffer_pct: 0 });
+      expect([403, 404]).toContain(probe.status);
+    }
   });
 });
 

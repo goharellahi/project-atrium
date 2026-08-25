@@ -87,13 +87,51 @@ export const PROBED: readonly string[] = [
   'POST /bookings/:id/pay',
   'GET /equipment-types',
   'GET /equipment-types/:id',
+  'GET /rooms/:id',
   'GET /rooms/:id/availability',
+  'GET /rooms/:id/equipment-types',
   'GET /search',
   'GET /venues/cancellation-policy',
   'GET /venues/reports/revenue',
   'PUT /venues/cancellation-policy',
   'GET /admin/reconciliation',
+  // Venue administration, added in P8. Writes, which is where tenant isolation
+  // actually costs money — a leaked read is an embarrassment, a leaked write
+  // changes another venue's prices.
+  'GET /venues/settings',
+  'PATCH /venues/settings',
+  'GET /venues/rooms',
+  'POST /venues/rooms',
+  'PATCH /venues/rooms/:id',
+  'POST /venues/equipment-types',
+  'PATCH /venues/equipment-types/:id',
 ];
+
+/**
+ * Routes that are deliberately cross-venue, and what their probe must assert.
+ *
+ * These are NOT exempt. `/search`, `/rooms/:id` and `/rooms/:id/equipment-types`
+ * publish the catalogue: every signed-in user sees every venue's inventory,
+ * which is what a marketplace is for. Isolation protects a venue's bookings,
+ * customers and revenue — not the existence of its rooms.
+ *
+ * So the probe cannot be "venue B is refused"; it is **"what comes back is
+ * inventory and nothing else"**. That assertion is what keeps the exemption
+ * honest over time: the moment one of these grows a utilisation figure, an
+ * occupancy count or a revenue column, the projection test fails and somebody
+ * has to decide on purpose.
+ *
+ * Listed here as well as in PROBED so the reason is written down next to the
+ * route rather than living only in a test name.
+ */
+export const CROSS_VENUE_BY_DESIGN: Readonly<Record<string, string>> = {
+  'GET /search': 'The catalogue. Publishes name, capacity, amenities, price across every venue.',
+  'GET /rooms/:id': 'One row of the same catalogue /search already publishes. Same projection.',
+  'GET /rooms/:id/equipment-types':
+    'What a booker may attach to this room. Name, hourly rate, units owned — never live usage, utilisation or revenue.',
+  'GET /rooms/:id/availability':
+    'Free slots for a room in the catalogue. Reports emptiness, never who holds the rest.',
+};
 
 /**
  * Routes that carry no tenant scope, each with the reason.
@@ -116,17 +154,32 @@ export interface CoverageResult {
   uncovered: string[];
   staleProbed: string[];
   staleExempt: string[];
+  /** Cross-venue entries naming a route that no longer exists. */
+  staleCrossVenue: string[];
+  /**
+   * Cross-venue entries that are not also in PROBED.
+   *
+   * A route cannot buy its way out of the census by declaring itself
+   * deliberately cross-venue. The declaration is a statement about WHAT the
+   * probe asserts, never a substitute for having one.
+   */
+  unprobedCrossVenue: string[];
 }
 
 export function checkCoverage(): CoverageResult {
   const registered = enumerateControllerRoutes();
   const known = new Set<string>([...PROBED, ...Object.keys(EXEMPT)]);
+  const probed = new Set<string>(PROBED);
 
   return {
     registered,
     uncovered: registered.filter((r) => !known.has(r)),
     staleProbed: PROBED.filter((r) => !registered.includes(r)),
     staleExempt: Object.keys(EXEMPT).filter((r) => !registered.includes(r)),
+    staleCrossVenue: Object.keys(CROSS_VENUE_BY_DESIGN).filter(
+      (r) => !registered.includes(r),
+    ),
+    unprobedCrossVenue: Object.keys(CROSS_VENUE_BY_DESIGN).filter((r) => !probed.has(r)),
   };
 }
 
