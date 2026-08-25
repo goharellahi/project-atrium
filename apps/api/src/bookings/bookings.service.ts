@@ -11,6 +11,7 @@ import {
   bookingLineItems,
   bookings,
   equipmentTypes,
+  payments,
   rooms,
   venues,
   type Booking,
@@ -610,6 +611,51 @@ export class BookingsService {
       .innerJoin(equipmentTypes, eq(equipmentTypes.id, bookingLineItems.equipmentTypeId))
       .where(eq(bookingLineItems.bookingId, bookingId));
 
+    /**
+     * The settled payment record, added in P8.
+     *
+     * ## Why the console needed this and what it was showing instead
+     *
+     * The checkout screen printed the payment as the provider described it at
+     * the moment the charge was ACCEPTED — the 202 — and never asked again. So
+     * a booking that reached CONFIRMED sat next to a payment panel reading
+     * PENDING with a charge id beside it, which reads as a contradiction and
+     * was reported as one.
+     *
+     * It was not a contradiction, and it was not INV-5 either: `payments.status`
+     * is genuinely advanced to SUCCEEDED by `onChargeSucceeded`, in the same
+     * transaction that confirms the booking, and the reconciliation report has
+     * always read that column rather than the 202. The stale value was in the
+     * browser, not in the database. What the console lacked was any endpoint
+     * that would tell it the settled truth: `POST /bookings/:id/pay` answers
+     * once, and `GET /bookings/:id` did not carry a payment at all.
+     *
+     * So the record is published here, on the read the console already polls,
+     * under exactly the tenant scope the booking itself was found by. It is not
+     * a second source of truth — it is the same row the reconciler reads.
+     *
+     * `LIMIT 1` is honest rather than lazy: `payments.idempotency_key` is
+     * `charge:<booking_id>` and UNIQUE, so a booking has at most one charge by
+     * construction. That is INV-3's mechanism, not a convention. A second row
+     * would be the `double_capture` discrepancy, and the place that is meant to
+     * be noticed is `GET /admin/reconciliation`, not silently here.
+     */
+    const [payment] = await this.db
+      .select({
+        payment_id: payments.id,
+        charge_id: payments.chargeId,
+        status: payments.status,
+        amount_minor: payments.amountMinor,
+        refunded_minor: payments.refundedMinor,
+        refund_id: payments.refundId,
+        failure_reason: payments.failureReason,
+        updated_at: payments.updatedAt,
+      })
+      .from(payments)
+      .where(eq(payments.bookingId, bookingId))
+      .orderBy(desc(payments.createdAt))
+      .limit(1);
+
     // Every field is listed rather than spread.
     //
     // `bookings.total_minor` is a bigint — money is stored in minor units as a
@@ -634,6 +680,14 @@ export class BookingsService {
       created_at: booking.createdAt.toISOString(),
       updated_at: booking.updatedAt.toISOString(),
       line_items: items.map((i) => ({ ...i, rate_minor: i.rate_minor.toString() })),
+      payment: payment
+        ? {
+            ...payment,
+            amount_minor: payment.amount_minor.toString(),
+            refunded_minor: payment.refunded_minor.toString(),
+            updated_at: payment.updated_at.toISOString(),
+          }
+        : null,
     };
   }
 
