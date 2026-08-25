@@ -3,7 +3,7 @@ import { Button } from '@/components/ui/button';
 import { Empty } from '@/components/ui/empty';
 import { Status } from '@/components/ui/status';
 import { Table, TableScroll, TBody, TD, TH, THead, TR } from '@/components/ui/table';
-import { amount, durationHours, shortId, utc } from '@/lib/format';
+import { amount, durationHours, shortId, venueTime } from '@/lib/format';
 import type { BookingList } from '@/lib/types';
 
 /**
@@ -97,7 +97,7 @@ export function BookingTable({
                   </TD>
                 ) : null}
                 <TD mono className="text-ink-muted">
-                  {utc(booking.starts_at)}
+                  {venueTime(booking.starts_at, booking.timezone)}
                 </TD>
                 {readOnly ? null : (
                   <TD numeric>{durationHours(booking.starts_at, booking.ends_at)}</TD>

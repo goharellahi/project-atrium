@@ -1,4 +1,5 @@
 /* eslint-disable no-console */
+import { createHmac } from 'node:crypto';
 import { Pool, type PoolClient } from 'pg';
 import { hash } from '@node-rs/argon2';
 import { fromLocalParts, toLocalParts, WEEKDAY_KEYS } from '../common/time/zoned-time';
@@ -178,6 +179,12 @@ export interface SeedSummary {
   equipmentTypes: number;
   users: number;
   policies: number;
+  /** How many of `policies` are venue overrides rather than the platform default. */
+  venuePolicies: number;
+  /** Settled bookings that were given a frozen cancellation policy. */
+  snapshots: number;
+  /** What the provider was told, and whether it heard. */
+  paygate: { attempted: number; registered: number; skipped: string | null };
   payments: number;
   bookings: number;
   lineItems: number;
@@ -262,9 +269,14 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
   // rebuilt database never gets it back. Restoring it here is not tidiness:
   // without that row every confirmation throws while resolving its policy
   // snapshot, so no booking can reach CONFIRMED at all. See the P5 log.
-  const policies = await seedCancellationPolicies(client);
+  const platformPolicies = await seedCancellationPolicies(client);
 
   const venues = await seedVenues(client, profile, rng);
+
+  // After the venues exist and before any booking does, so that every snapshot
+  // resolved below has the full set of policies to resolve against.
+  const venuePolicies = await seedVenuePolicies(client, venues, profile, rng);
+  const policies = platformPolicies + venuePolicies;
   const rooms = await seedRooms(client, profile, venues, rng);
   const equipment = await seedEquipment(client, profile, venues, rng);
   const users = await seedUsers(client, profile, venues, passwordHash, rng);
@@ -281,6 +293,18 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
 
   // Every settled booking gets the payment it implies. See seedPayments.
   const payments = await seedPayments(client);
+
+  // ...and the cancellation terms it was settled under. Must run after the
+  // bookings exist and after every policy row does. See seedPolicySnapshots.
+  const snapshots = await seedPolicySnapshots(client);
+
+  // ...and Paygate's own record of the money, so a seeded booking's refund can
+  // actually settle. Last, because it reads the payments this run just wrote.
+  const paygate = await seedPaygate(
+    client,
+    process.env.PAYGATE_BASE_URL,
+    process.env.PAYGATE_SECRET,
+  );
 
   await client.query('ANALYZE');
 
@@ -309,6 +333,9 @@ async function seed(client: PoolClient, profile: Profile): Promise<SeedSummary> 
     equipmentTypes: counted.equipment_types,
     users: counted.users,
     policies,
+    venuePolicies,
+    snapshots,
+    paygate,
     payments: counted.payments,
     bookings: counted.bookings,
     lineItems: counted.booking_line_items,
@@ -394,16 +421,167 @@ async function truncate(client: PoolClient): Promise<void> {
  */
 async function seedCancellationPolicies(client: PoolClient): Promise<number> {
   await client.query(`
-    INSERT INTO cancellation_policies (venue_id, tiers)
+    INSERT INTO cancellation_policies (venue_id, tiers, created_at)
     VALUES (NULL, '[
       { "min_hours_before": 48, "room_refund_pct": 100, "equipment_refund_pct": 100 },
       { "min_hours_before": 24, "room_refund_pct": 50,  "equipment_refund_pct": 100 },
       { "min_hours_before": 2,  "room_refund_pct": 0,   "equipment_refund_pct": 100 },
       { "min_hours_before": 0,  "room_refund_pct": 0,   "equipment_refund_pct": 0 }
-    ]'::jsonb)
+    ]'::jsonb,
+    -- Backdated deliberately, and it is load bearing rather than decorative.
+    -- Snapshots are resolved AS OF the booking's confirmation, and the seed
+    -- writes bookings up to eighteen months old. A platform default stamped
+    -- now() would post-date most of them, so an as-of resolution would find no
+    -- policy at all for the oldest bookings. The platform default has existed
+    -- for as long as the platform has; saying so here makes that true in data.
+    now() - interval '3 years')
   `);
 
   return 1;
+}
+
+/**
+ * Give some venues their own cancellation policy, written partway through the
+ * seeded history.
+ *
+ * ## Why the seed writes these at all
+ *
+ * Two reasons, and the second is the one that matters.
+ *
+ * First, `resolved_from: 'venue'` was unreachable on demo data: every venue
+ * inherited the platform default, so the override half of "policy is data, not
+ * code" had nothing behind it on the deployed instance.
+ *
+ * Second — and this is the property most likely to be probed — a venue policy
+ * whose `created_at` sits in the MIDDLE of that venue's booking history is what
+ * makes the snapshot demonstrable. Bookings that venue confirmed before the
+ * change carry the platform tiers; bookings it confirmed after carry the
+ * venue's. Both are visible at once, on one venue, in one list. If every policy
+ * were written at seed time the snapshots would all resolve identically and a
+ * reviewer would have no way to see that freezing them did anything.
+ *
+ * `cancellation_policies` is append-only, so this is an INSERT per venue and
+ * never an UPDATE — the same rule the live endpoint follows.
+ */
+async function seedVenuePolicies(
+  client: PoolClient,
+  venues: SeededVenue[],
+  profile: Profile,
+  rng: () => number,
+): Promise<number> {
+  const values: unknown[] = [];
+  const tuples: string[] = [];
+
+  for (const [i, venue] of venues.entries()) {
+    // Every third venue, so the platform default remains the common case and
+    // the override is visibly the exception.
+    if (i % 3 !== 0) continue;
+
+    // Somewhere in the older half of the booking window, so that venue has
+    // bookings on both sides of the change.
+    const monthsAgo = 1 + rng() * Math.max(1, profile.monthsBack - 1);
+
+    // Stricter than the platform default in the 24-48 hour band, so a booking
+    // cancelled in that window refunds a visibly different amount depending on
+    // which side of the change it was confirmed.
+    const tiers = [
+      { min_hours_before: 72, room_refund_pct: 100, equipment_refund_pct: 100 },
+      { min_hours_before: 24, room_refund_pct: 25, equipment_refund_pct: 50 },
+      { min_hours_before: 0, room_refund_pct: 0, equipment_refund_pct: 0 },
+    ];
+
+    const base = values.length;
+    values.push(venue.id, JSON.stringify(tiers), monthsAgo.toFixed(3));
+    tuples.push(
+      `($${base + 1}::uuid, $${base + 2}::jsonb,` +
+        ` now() - ($${base + 3}::numeric * interval '1 month'))`,
+    );
+  }
+
+  if (tuples.length === 0) return 0;
+
+  await client.query(
+    `INSERT INTO cancellation_policies (venue_id, tiers, created_at)
+     VALUES ${tuples.join(',')}`,
+    values,
+  );
+
+  return tuples.length;
+}
+
+/**
+ * Freeze onto every settled booking the cancellation policy that was live when
+ * it confirmed.
+ *
+ * ## The gap this closes
+ *
+ * The seed writes CONFIRMED, COMPLETED, CANCELLED and REFUNDED rows directly
+ * into the table. The live path that reaches those states is
+ * `onChargeSucceeded`, and that is where `policy_snapshot` is written — so no
+ * seeded booking had one. On the deployed demo data every booking detail page
+ * read "No terms are frozen onto this booking" and the cancel panel could not
+ * quote a refund, which made the entire policy-as-data story invisible on
+ * exactly the data a reviewer looks at first.
+ *
+ * ## Why the fix is here and not in the cancellation path
+ *
+ * The tempting fix is to have cancellation fall back to the live policy when a
+ * booking has no snapshot. That would be a correctness regression wearing the
+ * costume of a convenience: the guarantee is that a policy change cannot alter
+ * an already CONFIRMED booking, and a fallback silently breaks it for every
+ * booking whose snapshot is missing for any reason — including the ones where
+ * it is missing because something went wrong. A missing snapshot on a CONFIRMED
+ * booking is a defect to see, not a case to paper over. So the seed writes
+ * what the live path would have written, and the cancellation path stays
+ * strict.
+ *
+ * ## As of when
+ *
+ * `bookings.created_at`, which for a seeded settled booking is its confirmation
+ * — the seed has no separate holding phase. The lateral picks the newest policy
+ * for that venue that already existed at that instant, falling back to the
+ * newest platform policy that already existed at that instant. That is exactly
+ * `PaymentsService.resolveTiers`, with "at that instant" added; the live one
+ * needs no as-of clause because for it the instant is always now.
+ *
+ * CANCELLED is included alongside the other three. A seeded cancellation is a
+ * cancellation OF a confirmed booking — that is the only cancellation that
+ * moves money — so the terms it was cancelled under are precisely the thing
+ * that should be on the row.
+ */
+async function seedPolicySnapshots(client: PoolClient): Promise<number> {
+  // `src` is the same table again, and it has to be.
+  //
+  // A LATERAL in an UPDATE ... FROM may only reference tables in the FROM
+  // clause, and the UPDATE target is not one of them — Postgres answers
+  // "invalid reference to FROM-clause entry for table b". Joining `bookings`
+  // back in under another name gives the lateral something it is allowed to
+  // correlate with, and `src.id = b.id` keeps it to one row per booking.
+  const updated = await client.query(`
+    UPDATE bookings b
+       SET policy_snapshot = jsonb_build_object(
+             'tiers', p.tiers,
+             'policy_id', p.id,
+             'resolved_from', CASE WHEN p.venue_id IS NULL THEN 'platform' ELSE 'venue' END,
+             'snapshot_at', to_char(src.created_at AT TIME ZONE 'UTC',
+                                    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+           )
+      FROM bookings src
+      JOIN LATERAL (
+        SELECT cp.id, cp.tiers, cp.venue_id
+          FROM cancellation_policies cp
+         WHERE (cp.venue_id = src.venue_id OR cp.venue_id IS NULL)
+           AND cp.created_at <= src.created_at
+         -- A venue's own policy beats the platform default; among those, the
+         -- newest that already existed wins. Same precedence as resolveTiers.
+         ORDER BY (cp.venue_id IS NOT NULL) DESC, cp.created_at DESC
+         LIMIT 1
+      ) p ON true
+     WHERE src.id = b.id
+       AND b.status IN ('CONFIRMED','COMPLETED','CANCELLED','REFUNDED')
+  `);
+
+  return updated.rowCount ?? 0;
 }
 
 /**
@@ -431,6 +609,30 @@ async function seedCancellationPolicies(client: PoolClient): Promise<number> {
  * Keys and ids follow the same derivation the live path uses (`charge:<booking>`),
  * so a seeded booking is indistinguishable from one that went through Paygate
  * and `POST /bookings/:id/pay` on it is idempotent for the same reason.
+ *
+ * ## These charges are registered with Paygate, and that is new in P8
+ *
+ * `ch_seed_<uuid>` is minted here, and it used to exist only here. Paygate is a
+ * separate process; it had never heard of these ids, so a refund against a
+ * seeded charge was rejected `404 unknown_charge` and could never settle.
+ *
+ * The first reading of that was "a seed problem", and it was not. Paygate held
+ * its whole ledger in memory, and the free tier sleeps after fifteen idle
+ * minutes — so a charge created through the console has exactly the same fate
+ * after one cold start. The seed was just where it surfaced first, because
+ * seeded charges were born already forgotten.
+ *
+ * Paygate's ledger is durable now (`apps/paygate/src/ledger/`), so `seedPaygate`
+ * below hands these rows to it: one signed bulk import in batches, not twenty
+ * thousand HTTP charges. They are history to agree on rather than events to
+ * replay — they captured, this database already records that they captured, and
+ * the only thing ever missing was the provider's own row. Nothing is dispatched
+ * and no chaos plan is drawn.
+ *
+ * What is deliberately NOT done: replaying them through `POST /paygate/charges`.
+ * The provider fails ten percent of those on purpose, and every one it accepts
+ * dispatches a webhook that would try to CONFIRM bookings already CONFIRMED,
+ * filling the audit trail with illegal transitions. Seeding by side effect.
  */
 async function seedPayments(client: PoolClient): Promise<number> {
   const inserted = await client.query(`
@@ -472,6 +674,127 @@ async function seedPayments(client: PoolClient): Promise<number> {
   `);
 
   return inserted.rowCount ?? 0;
+}
+
+/**
+ * Hand the seeded charges to Paygate's ledger.
+ *
+ * ## Why over HTTP and not straight into the tables
+ *
+ * The seed could write `paygate_charges` itself — the two services share one
+ * Postgres instance on every target this runs on. It does not, on purpose:
+ * knowing Paygate's table shape from inside `apps/api` is precisely the
+ * coupling that the separate schema, the separate migrations and the absent
+ * imports exist to prevent. A boundary that the seed is allowed to reach
+ * through is not a boundary.
+ *
+ * So it asks Paygate, and Paygate writes its own rows. `POST
+ * /paygate/_ledger/import` takes up to 2,000 charges per call, so the demo
+ * profile is about a dozen requests and the full profile about a hundred and
+ * thirty — not the twenty thousand that replaying them as real charges would
+ * cost, and none of them chaotic.
+ *
+ * ## Signed, because it has to work in production
+ *
+ * The `/paygate/_test/*` surface is unauthenticated and therefore refuses to
+ * register under NODE_ENV=production. This route authenticates with the same
+ * HMAC over the same raw bytes with the same shared secret that Paygate signs
+ * its webhooks with, so it can exist on the deployed instance — which is
+ * exactly where the demo data that needs it lives.
+ *
+ * ## When it cannot reach Paygate
+ *
+ * It says so and carries on. A seeded database with an unregistered ledger is
+ * still a working database for everything except refunding seeded history, and
+ * failing the whole seed over it would be worse. The summary reports what
+ * happened either way, so "the refund 404s" is never a mystery.
+ */
+async function seedPaygate(
+  client: PoolClient,
+  baseUrl: string | undefined,
+  secret: string | undefined,
+): Promise<{ attempted: number; registered: number; skipped: string | null }> {
+  if (!baseUrl || !secret) {
+    return {
+      attempted: 0,
+      registered: 0,
+      skipped:
+        'PAYGATE_BASE_URL and PAYGATE_SECRET are not both set, so seeded charges exist only in this database',
+    };
+  }
+
+  const { rows } = await client.query<{
+    id: string;
+    reference: string;
+    amount_minor: string;
+    currency: string;
+    idempotency_key: string;
+    status: string;
+    created_at: Date;
+    refunded_minor: string;
+  }>(`
+    SELECT p.charge_id AS id,
+           p.booking_id::text AS reference,
+           p.amount_minor::text AS amount_minor,
+           b.currency,
+           p.idempotency_key,
+           -- Every seeded payment captured. A REFUNDED one captured first and
+           -- was given back afterwards, which is refunded_minor, not a
+           -- different charge outcome.
+           'succeeded' AS status,
+           p.created_at,
+           p.refunded_minor::text AS refunded_minor
+      FROM payments p
+      JOIN bookings b ON b.id = p.booking_id
+     WHERE p.charge_id IS NOT NULL
+     ORDER BY p.created_at
+  `);
+
+  if (rows.length === 0) return { attempted: 0, registered: 0, skipped: null };
+
+  const url = `${baseUrl.replace(/\/+$/, '')}/paygate/_ledger/import`;
+  let registered = 0;
+
+  for (const batch of chunk(rows, 1_000)) {
+    const payload = JSON.stringify({
+      charges: batch.map((r) => ({
+        id: r.id,
+        reference: r.reference,
+        amount_minor: Number(r.amount_minor),
+        currency: r.currency,
+        idempotency_key: r.idempotency_key,
+        status: r.status,
+        created_at: r.created_at.toISOString(),
+        // A seeded charge settled the instant it was made. There is no delivery
+        // to wait for and nothing asynchronous about history.
+        occurred_at: r.created_at.toISOString(),
+        refunded_minor: Number(r.refunded_minor),
+      })),
+    });
+
+    // Signed over the exact bytes that go on the wire, never a re-serialised
+    // object — the same rule Paygate follows in the other direction.
+    const signature = createHmac('sha256', secret).update(payload, 'utf8').digest('hex');
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-paygate-signature': signature },
+      body: payload,
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    if (!response.ok) {
+      return {
+        attempted: rows.length,
+        registered,
+        skipped: `paygate answered ${response.status} ${await response.text()}`,
+      };
+    }
+
+    registered += ((await response.json()) as { written: number }).written;
+  }
+
+  return { attempted: rows.length, registered, skipped: null };
 }
 
 // ---------------------------------------------------------------------------
@@ -1088,6 +1411,18 @@ interface BookingDraft {
   status: string;
   totalMinor: number;
   currency: string;
+  /**
+   * When the booking was made, which for a settled booking is also when it
+   * confirmed and therefore when its cancellation policy was frozen.
+   *
+   * Left to `DEFAULT now()` until P8, which meant every seeded booking — the
+   * two-year-old COMPLETED ones included — claimed to have been created in the
+   * same second the seed ran. Harmless while nothing read it; not harmless once
+   * the policy snapshot has to be resolved *as of* a moment in time, because
+   * every booking would resolve against the newest policy and the whole point
+   * of freezing a snapshot would be invisible.
+   */
+  createdAt: Date;
   lineItem: { equipmentTypeId: string; quantity: number; rateMinor: number } | null;
 }
 
@@ -1184,6 +1519,7 @@ function walkRoomCalendar(
       startsAt: slot.startsAt,
       endsAt: slot.endsAt,
       status,
+      createdAt: bookedAt(slot.startsAt, now, rng),
       totalMinor: Math.round(room.hourlyRateMinor * durationHours) + equipmentTotal,
       currency: venue.city.currency,
       lineItem: attachEquipment
@@ -1220,17 +1556,20 @@ async function flush(client: PoolClient, drafts: BookingDraft[]): Promise<number
         d.venueId, d.roomId, d.userId,
         d.startsAt.toISOString(), d.endsAt.toISOString(),
         d.status, d.totalMinor, d.currency,
+        d.createdAt.toISOString(),
       );
       tuples.push(
         `($${base + 1}::uuid, $${base + 2}::uuid, $${base + 3}::uuid,` +
           ` $${base + 4}::timestamptz, $${base + 5}::timestamptz,` +
-          ` $${base + 6}::booking_status, $${base + 7}::bigint, $${base + 8})`,
+          ` $${base + 6}::booking_status, $${base + 7}::bigint, $${base + 8},` +
+          ` $${base + 9}::timestamptz, $${base + 9}::timestamptz)`,
       );
     }
 
     const result = await client.query<{ id: string }>(
       `INSERT INTO bookings
-         (venue_id, room_id, user_id, starts_at, ends_at, status, total_minor, currency)
+         (venue_id, room_id, user_id, starts_at, ends_at, status, total_minor, currency,
+          created_at, updated_at)
        VALUES ${tuples.join(',')}
        RETURNING id`,
       values,
@@ -1270,6 +1609,28 @@ async function flush(client: PoolClient, drafts: BookingDraft[]): Promise<number
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * When a booking was made, given when it starts.
+ *
+ * Between one and roughly six weeks of lead time, never in the future. The
+ * exact distribution does not matter; that the instant is *before* the booking
+ * and *spread out* does, because it is the instant the policy snapshot is
+ * resolved as of. If every booking claimed to have been created at seed time,
+ * every snapshot would resolve against the newest policy row and a seeded
+ * database could not demonstrate the one property the design exists for — that
+ * a policy written after a booking confirmed does not reach back to it.
+ */
+function bookedAt(startsAt: Date, now: Date, rng: () => number): Date {
+  const days = 1 + Math.floor(rng() * 45);
+  const withinDay = Math.floor(rng() * 86_400_000);
+  const booked = new Date(startsAt.getTime() - days * 86_400_000 - withinDay);
+
+  // A booking made in the future is not a booking. Future slots with long lead
+  // times clamp to "just now" rather than being skipped.
+  const latest = now.getTime() - 60_000;
+  return booked.getTime() > latest ? new Date(latest) : booked;
+}
 
 function chunk<T>(items: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -1320,9 +1681,29 @@ function report(s: SeedSummary): void {
   console.log(
     `  ${s.venues} venues · ${s.rooms} rooms · ${s.equipmentTypes} equipment types · ` +
       `${s.users} users · ${s.bookings} bookings · ${s.lineItems} line items · ` +
-      `${s.payments} payments · ${s.policies} platform policy`,
+      `${s.payments} payments`,
+  );
+  console.log(
+    `  ${s.policies} cancellation policies (1 platform default + ${s.venuePolicies} venue ` +
+      `overrides) · ${s.snapshots} settled bookings carry a frozen snapshot`,
   );
   console.log('  (counted from the tables, not tallied in memory)');
+  console.log('');
+
+  if (s.paygate.skipped) {
+    console.log('  WARNING — seeded charges were NOT registered with Paygate:');
+    console.log(`    ${s.paygate.skipped}`);
+    console.log('    They exist in this database and not at the provider, so cancelling a');
+    console.log('    SEEDED confirmed booking quotes the right refund and then cannot settle');
+    console.log('    it — the provider answers 404 unknown_charge and reconciliation reports');
+    console.log('    refund_initiated_not_settled, correctly. Set PAYGATE_BASE_URL and');
+    console.log('    PAYGATE_SECRET and re-run to fix it.');
+  } else {
+    console.log(
+      `  ${s.paygate.registered} of ${s.paygate.attempted} charges registered with Paygate's` +
+        ' ledger, so a seeded booking refunds for real',
+    );
+  }
 
   // Said out loud, every time, rather than left for someone to notice. A seed
   // that under-delivers silently is the exact failure P5 spent a phase finding.

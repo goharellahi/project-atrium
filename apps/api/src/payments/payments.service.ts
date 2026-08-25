@@ -736,14 +736,43 @@ export class PaymentsService {
       // The key is already persisted, so this is recoverable: the reconciler
       // reports a captured charge whose refund never settled, and a retry with
       // the same key cannot double-refund.
+      const message = err instanceof Error ? err.message : String(err);
+
       log().error(
         {
           bookingId: instruction.bookingId,
           chargeId: instruction.chargeId,
-          err: err instanceof Error ? err.message : String(err),
+          err: message,
         },
         'payment.refund.failed',
       );
+
+      /**
+       * Write the reason down, added in P8.
+       *
+       * Until now a rejected refund existed only as a log line. The payment row
+       * showed `refunded_minor: 0` and a refund key with no refund id, the
+       * console showed a dash, and the reconciliation report reported
+       * `refund_initiated_not_settled` — all correct, and none of them able to
+       * say WHY. "The provider was never reached" and "the provider answered
+       * 404, this charge does not exist" are different problems with different
+       * fixes, and an operator staring at the report could not tell them apart.
+       *
+       * P8 found the second one by cancelling a seeded booking: the seed
+       * synthesises `ch_seed_<uuid>` charge ids for its captured payments, and
+       * Paygate — a separate process with its own store — has never heard of
+       * them. See `seedPayments` for why the seed cannot make them real, and
+       * README's Known Issues for what that means for a reviewer.
+       *
+       * Not fatal, and deliberately not rethrown: the refund key is persisted,
+       * so a retry converges on the same refund, and the reconciler is the
+       * place this is meant to surface.
+       */
+      await this.db
+        .update(payments)
+        .set({ failureReason: `refund rejected: ${message}`, updatedAt: new Date() })
+        .where(eq(payments.id, instruction.paymentId))
+        .catch(() => undefined);
     }
   }
 
@@ -887,13 +916,48 @@ export class PaymentsService {
         const state = await this.provider.getCharge(payment.chargeId);
 
         if (state === null) {
-          // Paygate keeps charges in memory and forgets them on restart, which
-          // on a free tier that sleeps is routine rather than alarming. There
-          // is nothing to apply and nothing was captured; the hold expires.
-          log().warn(
+          /**
+           * The provider says it has never heard of a charge it gave us the id
+           * for. That is a discrepancy, and until P8 this code called it
+           * routine.
+           *
+           * The comment that used to be here read: "Paygate keeps charges in
+           * memory and forgets them on restart, which on a free tier that
+           * sleeps is routine rather than alarming. There is nothing to apply
+           * and nothing was captured; the hold expires." Every clause of that
+           * is an inference from the provider's amnesia, and the conclusion —
+           * *nothing was captured* — does not follow from *nothing is
+           * remembered*. The money may well have moved.
+           *
+           * It also made this whole path inert. Polling exists to ask the
+           * provider for an outcome a lost webhook never delivered; against a
+           * provider that forgets, the only possible answer is "never heard of
+           * it", and treating that as an answer means the poll can never repair
+           * anything. Paygate's ledger is durable as of P8 precisely so this
+           * question has a real answer.
+           *
+           * So: no state change, because we still do not know what happened,
+           * and the charge id we hold is evidence that something did. It is
+           * recorded on the payment and left PENDING for
+           * `charge_accepted_not_settled` to report. A booking whose hold lapses
+           * meanwhile still expires — that is INV-4 and it is unaffected — but
+           * the money is now visible instead of assumed absent.
+           */
+          log().error(
             { paymentId: payment.id, chargeId: payment.chargeId },
             'payment.charge.unknown_to_provider',
           );
+
+          await this.db
+            .update(payments)
+            .set({
+              failureReason:
+                'provider does not recognise this charge id. It was issued by the provider, so this is unexplained rather than absent — reconciliation reports it as charge_accepted_not_settled.',
+              updatedAt: new Date(),
+            })
+            .where(eq(payments.id, payment.id))
+            .catch(() => undefined);
+
           continue;
         }
 

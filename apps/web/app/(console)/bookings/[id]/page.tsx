@@ -7,8 +7,9 @@ import { Panel, PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel
 import { Status } from '@/components/ui/status';
 import { Table, TableScroll, TBody, TD, TH, THead, TR } from '@/components/ui/table';
 import { api, ApiError, ApiUnreachableError } from '@/lib/api';
-import { durationHours, money, shortId, utc } from '@/lib/format';
+import { durationHours, money, shortId, venueTime } from '@/lib/format';
 import type { Booking } from '@/lib/types';
+import { PaymentPanel } from './payment-panel';
 import { CancelPanel } from './cancel-panel';
 
 export const metadata: Metadata = { title: 'Booking · Atrium' };
@@ -42,7 +43,7 @@ export default async function BookingPage({
     <>
       <PageHeader
         title={`Booking ${shortId(booking.id)}`}
-        description={`${utc(booking.starts_at)} · ${durationHours(booking.starts_at, booking.ends_at)}`}
+        description={`${booking.room_name ?? 'Room'} · ${venueTime(booking.starts_at, booking.timezone)} · ${durationHours(booking.starts_at, booking.ends_at)}`}
         actions={
           <>
             {live ? (
@@ -67,17 +68,25 @@ export default async function BookingPage({
             <PanelBody>
               <dl className="grid gap-4 sm:grid-cols-2">
                 <Pair label="Booking id" value={booking.id} />
-                <Pair label="Room id" value={booking.room_id} />
-                <Pair label="Venue id" value={booking.venue_id} />
-                <Pair label="Starts" value={utc(booking.starts_at)} />
-                <Pair label="Ends" value={utc(booking.ends_at)} />
+                <Pair label="Room" value={booking.room_name ?? booking.room_id} />
+                <Pair label="Venue" value={booking.venue_name ?? booking.venue_id} />
+                <Pair label="Starts" value={venueTime(booking.starts_at, booking.timezone)} />
+                <Pair label="Ends" value={venueTime(booking.ends_at, booking.timezone)} />
                 <Pair
                   label="Hold expires"
-                  value={booking.expires_at ? utc(booking.expires_at) : '—'}
+                  value={
+                    booking.expires_at
+                      ? venueTime(booking.expires_at, booking.timezone)
+                      : '—'
+                  }
                 />
-                <Pair label="Created" value={utc(booking.created_at)} />
-                <Pair label="Last updated" value={utc(booking.updated_at)} />
+                <Pair label="Created" value={venueTime(booking.created_at, booking.timezone)} />
+                <Pair label="Last updated" value={venueTime(booking.updated_at, booking.timezone)} />
               </dl>
+
+              <p className="mt-4 text-xs text-ink-muted">
+                Times are the venue&apos;s local clock — {booking.timezone}.
+              </p>
 
               <div className="mt-4 flex items-baseline justify-between border-t border-line pt-4">
                 <span className="text-xs uppercase tracking-wide text-ink-muted">
@@ -131,6 +140,12 @@ export default async function BookingPage({
             </Panel>
           ) : null}
 
+          <PaymentPanel
+            payment={booking.payment}
+            currency={booking.currency}
+            timezone={booking.timezone}
+          />
+
           <Panel>
             <PanelHeader>
               <PanelTitle>Cancellation terms</PanelTitle>
@@ -175,16 +190,19 @@ export default async function BookingPage({
                 </TableScroll>
                 <p className="border-t border-line px-4 py-3 text-xs text-ink-muted">
                   Frozen onto this booking at{' '}
-                  {utc(booking.policy_snapshot.snapshot_at)}. A later change to the
+                  {venueTime(booking.policy_snapshot.snapshot_at, booking.timezone)}. A later change to the
                   venue&apos;s policy does not reach back to it.
                 </p>
               </>
             ) : (
               <PanelBody>
                 <p className="text-sm text-ink-muted">
-                  No terms are frozen onto this booking. The snapshot is written when a
-                  booking is confirmed, so a hold that was never paid for has none — and
-                  cancelling one moves no money.
+                  No terms are frozen onto this booking. The snapshot is written at
+                  confirmation, so a hold that was never paid for has none — and
+                  cancelling one moves no money, which is why it needs none. On a
+                  booking that HAS reached CONFIRMED, an empty panel here is a defect
+                  rather than a state: cancellation reads this and never the live
+                  policy, precisely so a later policy change cannot reach back.
                 </p>
               </PanelBody>
             )}

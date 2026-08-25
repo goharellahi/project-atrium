@@ -15,7 +15,14 @@ import { checkCoverage } from './routes.js';
  */
 describe('route census', () => {
   it('every registered route is either probed by the INV-6 suite or exempt with a reason', () => {
-    const { registered, uncovered, staleProbed, staleExempt } = checkCoverage();
+    const {
+      registered,
+      uncovered,
+      staleProbed,
+      staleExempt,
+      staleCrossVenue,
+      unprobedCrossVenue,
+    } = checkCoverage();
 
     expect(registered.length, 'no controllers found — the census is reading the wrong path').toBeGreaterThan(0);
 
@@ -30,5 +37,17 @@ describe('route census', () => {
     // would make the coverage claim silently false while still passing.
     expect(staleProbed, 'PROBED names a route that no longer exists').toEqual([]);
     expect(staleExempt, 'EXEMPT names a route that no longer exists').toEqual([]);
+    expect(
+      staleCrossVenue,
+      'CROSS_VENUE_BY_DESIGN names a route that no longer exists',
+    ).toEqual([]);
+
+    // A deliberately cross-venue route still needs a probe. The declaration
+    // says what the probe must assert — that the response is inventory and
+    // nothing operational — it does not replace the probe.
+    expect(
+      unprobedCrossVenue,
+      'CROSS_VENUE_BY_DESIGN entries must also appear in PROBED',
+    ).toEqual([]);
   });
 });

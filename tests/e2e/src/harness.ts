@@ -336,11 +336,18 @@ export async function paygate<T = unknown>(
  */
 export async function deliver(
   chargeId: string,
-  options: { event?: string; times?: number; corruptSignature?: boolean } = {},
+  options: {
+    event?: string;
+    times?: number;
+    corruptSignature?: boolean;
+    /** Required for `refund.succeeded`: which refund the event is about. */
+    refundId?: string;
+  } = {},
 ): Promise<DeliveryRecord[]> {
   const res = await paygate<{ deliveries: DeliveryRecord[] }>('/paygate/_test/deliver', {
     charge_id: chargeId,
     ...(options.event ? { event: options.event } : {}),
+    ...(options.refundId ? { refund_id: options.refundId } : {}),
     times: options.times ?? 1,
     corrupt_signature: options.corruptSignature ?? false,
   });

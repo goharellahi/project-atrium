@@ -5,14 +5,13 @@ import { useEffect, useState, useTransition } from 'react';
 import { BookingPanel } from './booking-panel';
 import { Button } from '@/components/ui/button';
 import { Empty } from '@/components/ui/empty';
-import { Input, Label } from '@/components/ui/input';
-import { LabelledField } from '@/components/ui/input';
+import { Label, LabelledField } from '@/components/ui/input';
+import { DateField } from '@/components/ui/datetime-field';
 import { Select } from '@/components/ui/select';
 import { Panel, PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel';
 import { cn } from '@/lib/cn';
-import { dayIn, timeIn } from '@/lib/format';
+import { dayIn, timeIn, zoneLabel } from '@/lib/format';
 import type { Availability, EquipmentType, FreeSlot } from '@/lib/types';
-import type { EquipmentAccess } from './hold-state';
 
 /**
  * Room availability, and the slot the customer picks out of it.
@@ -32,14 +31,12 @@ export function RoomWorkspace({
   availability,
   hourlyRateMinor,
   equipment,
-  equipmentAccess,
   range,
 }: {
   roomId: string;
   availability: Availability;
   hourlyRateMinor: string | null;
   equipment: EquipmentType[];
-  equipmentAccess: EquipmentAccess;
   range: { from: string; to: string; duration: number };
 }) {
   const router = useRouter();
@@ -87,22 +84,28 @@ export function RoomWorkspace({
           */}
           <form onSubmit={applyRange}>
             <div className="flex flex-wrap items-end gap-4">
+              {/*
+                Styled date controls rather than raw `<input type="date">`.
+                DESIGN.md's contract is that every control on this console looks
+                like it belongs to the same product; a native date input renders
+                as whatever the reader's browser feels like, which on Chrome is
+                a blue-tinted field with a picker glyph that matches nothing
+                else on the page. `DateField` keeps the native picker — losing
+                it would be a real regression on a phone — and puts the
+                console's own border, height and mono type around it.
+              */}
               <LabelledField label="From" htmlFor="range-from" className="w-[168px]">
-                <Input
+                <DateField
                   id="range-from"
-                  type="date"
                   value={form.from}
-                  onChange={(event) => setForm({ ...form, from: event.target.value })}
-                  className="font-mono text-data"
+                  onValueChange={(next) => setForm({ ...form, from: next })}
                 />
               </LabelledField>
               <LabelledField label="To" htmlFor="range-to" className="w-[168px]">
-                <Input
+                <DateField
                   id="range-to"
-                  type="date"
                   value={form.to}
-                  onChange={(event) => setForm({ ...form, to: event.target.value })}
-                  className="font-mono text-data"
+                  onValueChange={(next) => setForm({ ...form, to: next })}
                 />
               </LabelledField>
               <div className="flex w-[140px] flex-col gap-1">
@@ -123,7 +126,13 @@ export function RoomWorkspace({
             </div>
             <p className="mt-2 text-xs text-ink-muted">
               A range of at most 31 days. Slot length is what gets enumerated, and the
-              room takes bookings between 1 and 8 hours.
+              room takes bookings between 1 and 8 hours. Every time on this screen is
+              the venue&apos;s local clock —{' '}
+              <span className="font-mono">
+                {availability.timezone} (
+                {zoneLabel(new Date().toISOString(), availability.timezone)})
+              </span>
+              .
             </p>
           </form>
         </PanelBody>
@@ -180,7 +189,6 @@ export function RoomWorkspace({
           timezone={availability.timezone}
           hourlyRateMinor={hourlyRateMinor}
           equipment={equipment}
-          equipmentAccess={equipmentAccess}
         />
       </Panel>
     </div>

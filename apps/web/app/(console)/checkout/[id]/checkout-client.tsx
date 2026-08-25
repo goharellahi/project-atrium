@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Callout } from '@/components/ui/callout';
 import { Panel, PanelBody, PanelHeader, PanelTitle } from '@/components/ui/panel';
 import { Status } from '@/components/ui/status';
-import { money, utc } from '@/lib/format';
+import { money, venueTime } from '@/lib/format';
 import type { Booking } from '@/lib/types';
 import { extendHold, payForBooking } from './actions';
 import { EMPTY_EXTEND_STATE, EMPTY_PAY_STATE, type PayState } from './pay-state';
@@ -141,9 +141,17 @@ export function CheckoutClient({
           <PanelBody>
             <dl className="grid gap-4 sm:grid-cols-2">
               <Pair label="Booking id" value={booking.id} mono />
-              <Pair label="Room id" value={booking.room_id} mono />
-              <Pair label="Starts" value={utc(booking.starts_at)} mono />
-              <Pair label="Ends" value={utc(booking.ends_at)} mono />
+              <Pair label="Room" value={booking.room_name ?? booking.room_id} />
+              <Pair
+                label="Starts"
+                value={venueTime(booking.starts_at, booking.timezone)}
+                mono
+              />
+              <Pair
+                label="Ends"
+                value={venueTime(booking.ends_at, booking.timezone)}
+                mono
+              />
               <Pair label="Total" value={money(booking.total_minor, booking.currency)} mono />
               <Pair
                 label="Extensions used"
@@ -268,21 +276,35 @@ export function CheckoutClient({
               </p>
               <dl className="mt-2 flex flex-col gap-1">
                 <PairInline label="Charge" value={payState.payment.charge_id ?? '—'} />
-                <PairInline label="Payment" value={payState.payment.status} />
+                <PairInline label="Accepted as" value={payState.payment.status} />
                 <PairInline label="Key" value={payState.payment.idempotency_key} />
+                {/*
+                  The settled row, beside the acceptance receipt rather than
+                  instead of it. `GET /bookings/:id` now carries the payment the
+                  reconciler reads, and this screen already polls that endpoint,
+                  so both states are visible and both are labelled.
+                */}
+                <PairInline
+                  label="Settled as"
+                  value={booking.payment?.status ?? 'not settled yet'}
+                />
               </dl>
               {/*
-                This is what the provider said when it accepted the charge, and
-                it is not refreshed afterwards — which is why a CONFIRMED
-                booking can show a PENDING payment here. That is not a
-                contradiction, it is the whole shape of the system: the charge
-                is accepted first and the webhook settles it second. Quietly
-                re-reading the payment to make the two agree would hide the one
-                thing this screen exists to show.
+                Two lines, and the difference between them is the point.
+                "Accepted as" is what the provider said when it took the charge,
+                and it never changes. "Settled as" is the payments row, which the
+                webhook advances and which the reconciliation report reads.
+
+                P7 showed only the first, so a CONFIRMED booking sat beside a
+                payment reading PENDING and looked like a contradiction. It was
+                not one — payments.status is genuinely advanced on capture — but
+                a screen that can be read as one is a defect whatever the
+                database says.
               */}
               <p className="mt-2 text-xs text-ink-muted">
-                As the provider answered when the charge was accepted. The webhook
-                settles it afterwards, which is what moves the booking.
+                Accepted first, settled second. The gap between these two lines is the
+                webhook in flight — which for one delivery in twenty this provider parks
+                deliberately for a minute or more.
               </p>
             </div>
           ) : null}

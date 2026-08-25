@@ -1,10 +1,52 @@
 import Link from 'next/link';
 import { cn } from '@/lib/cn';
 import { shortId } from '@/lib/format';
-import { isStaff } from '@/lib/session';
+import { hasVenueScope } from '@/lib/session';
 import type { Me } from '@/lib/types';
 import { SidebarNav, type NavItem } from './sidebar-nav';
 import { SignOutButton } from './sign-out-button';
+
+/**
+ * The navigation each role's permissions justify — no more, and no less.
+ *
+ * P7 had one list gated by `isStaff`, which is true for a PLATFORM_ADMIN. So a
+ * platform admin was offered a "Venue" item for a venue they do not have, and
+ * was offered no route at all to `/admin/reconciliation` — the one report that
+ * is theirs alone and that INV-5 is proven by. Both halves of that were wrong
+ * in the same way: the nav was describing a rank rather than a set of
+ * permissions.
+ *
+ * The labels differ by role too, because the same route is not the same thing
+ * to everyone. `GET /bookings` is scoped by the token: a customer's own rows, a
+ * venue's rows, or — for a platform admin, who has no scope — every booking on
+ * the platform. Calling that third one "My bookings" would be a lie in the
+ * navigation.
+ */
+function navFor(role: Me['role']): NavItem[] {
+  const search: NavItem = { href: '/search', label: 'Search', match: ['/search', '/rooms'] };
+
+  if (role === 'PLATFORM_ADMIN') {
+    return [
+      search,
+      { href: '/bookings', label: 'All bookings', match: ['/bookings', '/checkout'] },
+      {
+        href: '/reconciliation',
+        label: 'Reconciliation',
+        match: ['/reconciliation'],
+      },
+    ];
+  }
+
+  const bookings: NavItem = {
+    href: '/bookings',
+    label: 'My bookings',
+    match: ['/bookings', '/checkout'],
+  };
+
+  return hasVenueScope(role)
+    ? [search, bookings, { href: '/venue', label: 'Venue', match: ['/venue'] }]
+    : [search, bookings];
+}
 
 /**
  * The application shell.
@@ -20,13 +62,7 @@ import { SignOutButton } from './sign-out-button';
  * phone is not navigation, it is an obstruction.
  */
 export function AppShell({ user, children }: { user: Me; children: React.ReactNode }) {
-  const items: NavItem[] = [
-    { href: '/search', label: 'Search', match: ['/search', '/rooms'] },
-    { href: '/bookings', label: 'My bookings', match: ['/bookings', '/checkout'] },
-    ...(isStaff(user.role)
-      ? [{ href: '/venue', label: 'Venue', match: ['/venue'] }]
-      : []),
-  ];
+  const items = navFor(user.role);
 
   return (
     <div className="flex min-h-screen flex-col lg:flex-row">
@@ -62,15 +98,43 @@ export function AppShell({ user, children }: { user: Me; children: React.ReactNo
  * Who you are signed in as, and — the part that matters in a multi-tenant
  * console — which tenant you are acting for.
  *
- * The venue is shown as its id rather than its name, and that is a gap rather
- * than a choice: this API has no endpoint that returns the caller's venue.
- * `/auth/me` carries `venueId` and nothing else, and the only place a venue's
- * name appears is inside the revenue report, which runs four aggregates and
- * demands a date range. Spending that on a label would be the wrong trade, so
- * the id is shown in mono with the full value on hover, and the missing
- * endpoint is recorded in PLAN.md next to the other four.
+ * ## "all venues" was the wrong words for two different roles
+ *
+ * A CUSTOMER's sidebar read "all venues", which describes a privilege. A
+ * customer has no venue scope at all: they can browse every venue's catalogue,
+ * like anyone, and they can see exactly one person's bookings — their own. A
+ * PLATFORM_ADMIN genuinely does have platform-wide reach, and the two were
+ * being told the same thing.
+ *
+ * So each role now says what its token actually means. The venue id stays in
+ * mono on hover for the two roles that have one; the name is not fetched here
+ * because `GET /venues/settings` is a request per navigation for a label, and
+ * the id is what appears in every other identifier on these screens anyway.
  */
+function scopeLabel(user: Me): { text: string; title: string } {
+  switch (user.role) {
+    case 'PLATFORM_ADMIN':
+      return {
+        text: 'every venue',
+        title: 'No venue on this token — platform-wide reach by role.',
+      };
+    case 'CUSTOMER':
+      return {
+        text: 'your own bookings',
+        title:
+          'No venue scope. The room catalogue is public to signed-in users; bookings are yours alone.',
+      };
+    default:
+      return {
+        text: user.venueId ? `venue ${shortId(user.venueId)}` : 'no venue on this token',
+        title: user.venueId ?? 'No venue on this token',
+      };
+  }
+}
+
 function Identity({ user }: { user: Me }) {
+  const scope = scopeLabel(user);
+
   return (
     <div className="flex flex-col gap-3 border-line px-4 py-4 lg:border-t">
       <div className="flex flex-col gap-2">
@@ -81,11 +145,8 @@ function Identity({ user }: { user: Me }) {
           <span className="font-mono text-xs uppercase tracking-wide text-ink">
             {user.role.replace('_', ' ')}
           </span>
-          <span
-            className="truncate font-mono text-xs text-ink-muted"
-            title={user.venueId ?? 'No venue on this token'}
-          >
-            {user.venueId ? `venue ${shortId(user.venueId)}` : 'all venues'}
+          <span className="truncate font-mono text-xs text-ink-muted" title={scope.title}>
+            {scope.text}
           </span>
         </div>
       </div>

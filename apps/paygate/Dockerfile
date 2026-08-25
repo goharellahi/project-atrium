@@ -20,6 +20,10 @@ COPY tsconfig.base.json pnpm-workspace.yaml package.json ./
 COPY apps/paygate ./apps/paygate
 WORKDIR /repo/apps/paygate
 RUN pnpm build
+# tsc emits .js only. The ledger's migration runner resolves .sql files relative
+# to its own location, so they have to be carried across explicitly — the same
+# line, for the same reason, as apps/api/Dockerfile.
+RUN cp -r src/ledger/migrations dist/ledger/migrations
 
 FROM base AS runtime
 WORKDIR /repo/apps/paygate

@@ -9,7 +9,7 @@ import {
   type OperatingHours,
 } from '../common/time/operating-hours';
 import { addMinutes } from '../common/time/zoned-time';
-import type { AvailabilityQuery } from '../bookings/bookings.schemas';
+import { MIN_LEAD_MINUTES, type AvailabilityQuery } from '../bookings/bookings.schemas';
 
 interface BusyInterval {
   /** Start of the occupied period. */
@@ -87,6 +87,25 @@ export class AvailabilityService {
 
     const busy = await this.busyIntervals(roomId, query.from, query.to);
 
+    /**
+     * Never enumerate a start time the hold path is going to refuse.
+     *
+     * Bookings need `MIN_LEAD_MINUTES` of lead time. This endpoint did not know
+     * that, so a range beginning today listed every slot from the venue's
+     * opening — including the ones that had already happened. The console
+     * rendered them as buttons, and clicking the first one answered
+     * "Bookings must start at least 60 minutes ahead", which reads as a bug in
+     * the console rather than as the rule it is. Found in P8, in a browser, by
+     * clicking the first slot of the day.
+     *
+     * This does not make the endpoint authoritative and it is not meant to. It
+     * stays advisory: a slot listed here can still be gone by the time it is
+     * clicked, and the hold path still decides. What it stops doing is advising
+     * something that could never have worked — which is a different and worse
+     * kind of wrong, because no amount of racing produces it.
+     */
+    const earliest = addMinutes(new Date(), MIN_LEAD_MINUTES);
+
     const freeSlots = this.enumerate(
       hours,
       room.timezone,
@@ -94,6 +113,7 @@ export class AvailabilityService {
       query.to,
       duration,
       busy,
+      earliest,
     );
 
     return {
@@ -156,6 +176,7 @@ export class AvailabilityService {
     to: Date,
     durationMinutes: number,
     busy: BusyInterval[],
+    earliest: Date,
   ): FreeSlot[] {
     const slots: FreeSlot[] = [];
     const turnaround = this.env.ROOM_TURNAROUND_MINUTES;
@@ -174,7 +195,10 @@ export class AvailabilityService {
         const occupiedEnd = addMinutes(slotEnd, turnaround);
 
         const clashes = busy.some((b) => b.from < occupiedEnd && b.to > cursor);
-        if (!clashes) {
+        // `continue`, not `break`: the cursor still has to advance, and a
+        // window whose early slots are too soon may have perfectly good ones
+        // later the same day.
+        if (!clashes && cursor >= earliest) {
           slots.push({
             starts_at: cursor.toISOString(),
             ends_at: slotEnd.toISOString(),

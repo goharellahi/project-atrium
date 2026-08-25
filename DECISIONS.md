@@ -5,9 +5,16 @@ what was rejected, and what the choice costs. A decision with no cost listed is
 not a decision, it is a preference.
 
 > **Written as decisions are made, not reconstructed at the end.** Entries 1–8
-> are from P4 (payment integrity and tenant isolation); 9–11 are from P5 and 12
-> from P6, and every one of those was forced by running the system rather than
-> reasoning about it. The P0–P2 decisions —
+> are from P4 (payment integrity and tenant isolation); 9–11 are from P5, 12
+> from P6 and 13 from P8, and every one of those was forced by running the
+> system rather than reasoning about it.
+>
+> **Entry 13 reverses a decision made in P3.** The original is left exactly as
+> it was written, in `apps/paygate/src/ledger/ledger.ts` and in ARCHITECTURE.md
+> §7, and 13 records what changed and why the first answer was wrong. Rewriting
+> the earlier reasoning would hide the most useful thing in this file — that a
+> decision which was defensible when it was taken can still be wrong, and that
+> the way it was found out was by running it. The P0–P2 decisions —
 > the exclusion constraint over query-then-insert, the sweep line over
 > `SUM(quantity)`, advisory-lock election over an environment flag, minor units
 > as `bigint` — currently live in `ARCHITECTURE.md` §3 and §7 and are folded in
@@ -326,3 +333,127 @@ are not CPU-bound. If hold still missed there, the diagnosis is wrong and the
 endpoint itself needs work — most likely folding the advisory lock and the
 stale-hold expiry into one statement to shorten the critical section
 (`LOAD_TEST.md` §5, step 3).
+
+---
+
+## 13. Paygate keeps a durable ledger — reversing P3's "a test double needs no database"
+
+**Reversed in P8.** Paygate held every charge, refund and delivery in a `Map`
+until this phase. `store.ts` said why, and it is worth quoting in full because
+the reasoning is not silly:
+
+> Paygate's state, in memory. Deliberate: Paygate is a test double, not a
+> system of record. Restarting it between runs *should* wipe it, and giving it
+> a database would invite the reviewer to believe the API's payment integrity
+> depends on the provider remembering things. It does not — the exactly-once
+> effect (INV-3) is the API's job, enforced in Postgres. Paygate's only
+> obligations are the idempotency contract and the chaos.
+
+Every sentence of that is true about **INV-3**, and INV-3 is not the invariant
+it broke.
+
+**What was wrong with it.** INV-5 says money is never silently lost: every
+captured charge maps to exactly one CONFIRMED booking or exactly one refund,
+provable by a reconciliation endpoint returning zero discrepancies. A provider
+that forgets cannot participate in that proof. Render's free tier sleeps after
+fifteen idle minutes, so a charge captured before lunch does not exist after
+it — and `POST /paygate/refunds` against it answers `404 unknown_charge`. The
+money is gone from the provider's point of view and owed from ours, which is
+precisely the state the invariant says must be unreachable without a trace.
+
+It also made a whole recovery path inert. `CHARGE_POLL_AFTER_SECONDS` exists so
+the API can ask the provider about an outcome a lost webhook never delivered.
+Against a provider with amnesia that question has exactly one possible answer,
+and the API was treating "never heard of it" as an answer rather than as the
+absence of one — a comment in `settleAcceptedCharges` said so in as many words:
+*"There is nothing to apply and nothing was captured; the hold expires."*
+Nothing is remembered does not imply nothing was captured.
+
+**How it was found.** Not by reasoning about it — by cancelling a seeded
+CONFIRMED booking through the console in P8 and watching the refund never
+settle. The first diagnosis was "the seed invents charge ids", and the first fix
+was to document that as a seed limitation with three rejected workarounds. That
+was the right instinct about the seed and the wrong diagnosis about the system:
+a charge created through the console has exactly the same fate after one cold
+start. The seed was simply where it surfaced first, because seeded charges were
+born already forgotten.
+
+**Chosen.** Paygate's own Postgres tables — `paygate_charges`,
+`paygate_refunds`, `paygate_idempotency`, `paygate_deliveries` — created by
+Paygate's own migration runner against its own `paygate_migrations` history
+table.
+
+**Rejected: keeping it in memory and teaching the API to cope.** There is no
+version of "cope" that is not either inventing an outcome or writing off the
+money. Both are INV-5 violations with better manners.
+
+**Rejected: special-casing the seed.** A payment path that knows which charge
+ids are synthetic is a payment path that has stopped being a payment path.
+
+**Rejected: sharing the API's Drizzle schema.** It would have been fewer lines.
+It would also mean the provider a candidate is meant to treat as a third party
+shares an ORM definition with the service calling it, and the boundary would
+exist only as a comment. Forty lines of migration runner buys a boundary that
+is visible in the import graph.
+
+**What it costs.**
+
+*A shared instance, and the explaining that goes with it.* Both services point
+at one Postgres, because the free tier gives one Postgres. That is a hosting
+cost, not a design one, and everything that would make it coupling is absent:
+separate tables, separate migrations, separate connection variable, no join, no
+foreign key across the boundary, no import in either direction.
+`paygate_charges.reference` holds the API's booking id as an *opaque string*,
+exactly as a real provider's `metadata.reference` does — Paygate never resolves
+it, never validates it, and answers identically if the API's schema is dropped.
+Pointing `PAYGATE_DATABASE_URL` at a different instance is the whole of what
+separating them takes. It still has to be explained every time somebody notices,
+which is why it is written down here and in ARCHITECTURE.md §7 rather than left
+to be discovered.
+
+*A slower provider.* Every charge is now a transaction rather than a `Map.set`.
+It has not moved any measured number — Paygate was never the bottleneck, the
+three CPU-pinned API replicas are (entry 12) — but it is real and it is on the
+hot path of the concurrency proof.
+
+*One more thing that can be misconfigured.* `PAYGATE_STORE=postgres` without a
+URL is a boot failure rather than a fallback, deliberately: a silent fallback to
+memory is exactly how a deployment ends up running the broken store with nobody
+having chosen it. The cost of that strictness is a service that refuses to start
+on an incomplete environment, which is the right way round.
+
+*Orphaned rows across re-seeds.* Re-running the seed truncates the API's tables
+and mints new booking ids, so the previous run's charges stay in Paygate's
+ledger with nothing pointing at them. Left alone on purpose: a real provider
+does not forget because a merchant reset their own database, and a destructive
+"clear the provider" endpoint would be a worse thing to own than a few thousand
+unreferenced rows.
+
+**What it bought, beyond the invariant.** Two races that were previously safe by
+accident are now safe on purpose. `openCharge` claims its Idempotency-Key with
+`INSERT ... ON CONFLICT DO NOTHING RETURNING`, so concurrent requests carrying
+one key produce one charge and one replay; in memory that held only because Node
+does not interleave between a read and a write. `openRefund` takes `FOR UPDATE`
+on the charge before checking `refunded_minor + amount <= amount_minor`, because
+that check is a read-modify-write and two concurrent partial refunds could each
+pass it independently — with a CHECK constraint as the backstop.
+
+And the reconciliation report gained the class whose absence let this hide:
+`charge_accepted_not_settled`. The refund side has had
+`refund_accepted_not_settled` since P4; the charge side had nothing, so a
+payment sitting PENDING forever with a provider charge id against it was
+invisible to the one report whose job is to find money nobody is accounting for.
+
+**What would change this decision.** Nothing about the failure — it is not a
+free-tier quirk, it is what any provider restart does. If Paygate ever needed to
+run as more than one instance the design would need revisiting, but in the
+direction of more durability, not less.
+
+**How it is proven.** `tests/e2e/src/provider-restart.e2e.test.ts`: pay,
+confirm, restart the container, refund, and the refund settles. It asserts the
+restart actually happened rather than assuming it — `/health` reports
+`started_at`, so a `docker compose restart` that quietly did nothing cannot make
+the test pass for the wrong reason. Run against `PAYGATE_STORE=memory` on the
+same image, all three of its tests fail; against the durable ledger all three
+pass. A test that cannot fail against the bug it was written for is not
+evidence.

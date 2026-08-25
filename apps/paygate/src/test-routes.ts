@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { z } from 'zod';
 import type { PaygateConfig } from './config.js';
 import type { Deliverer } from './delivery.js';
-import type { Store } from './store.js';
+import type { ForcedDelays, Ledger } from './ledger/index.js';
 import type { DeliveryRecord, WebhookEvent } from './types.js';
 
 /**
@@ -48,7 +48,8 @@ function issues(err: z.ZodError): string {
 export function registerTestRoutes(
   app: FastifyInstance,
   _cfg: PaygateConfig,
-  store: Store,
+  ledger: Ledger,
+  forcedDelays: ForcedDelays,
   deliverer: Deliverer,
 ): void {
   /** Force a specific event for a charge, right now. */
@@ -57,10 +58,10 @@ export function registerTestRoutes(
     if (!parsed.success) return fail(reply, 422, 'invalid_body', issues(parsed.error));
     const body = parsed.data;
 
-    const charge = store.charges.get(body.charge_id);
+    const charge = await ledger.getCharge(body.charge_id);
     if (!charge) return fail(reply, 404, 'unknown_charge', `no charge ${body.charge_id}`);
 
-    const refund = body.refund_id ? store.refunds.get(body.refund_id) : undefined;
+    const refund = body.refund_id ? await ledger.getRefund(body.refund_id) : null;
     if (body.refund_id && !refund) {
       return fail(reply, 404, 'unknown_refund', `no refund ${body.refund_id}`);
     }
@@ -106,7 +107,7 @@ export function registerTestRoutes(
     if (!parsed.success) return fail(reply, 422, 'invalid_body', issues(parsed.error));
     const { charge_id, seconds } = parsed.data;
     const delayMs = Math.round(seconds * 1000);
-    store.armForcedDelay(charge_id ?? null, delayMs);
+    forcedDelays.arm(charge_id ?? null, delayMs);
     req.log.warn({ charge_id: charge_id ?? null, delay_ms: delayMs }, 'paygate.test.delay_armed');
     return reply.code(200).send({ armed: true, charge_id: charge_id ?? null, delay_ms: delayMs });
   });

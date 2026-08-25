@@ -435,6 +435,7 @@ because of it.
 | 6 | `GET /paygate/charges/:id` and `GET /paygate/refunds/:id` | Read-only. Lets a reviewer see every delivery attempt and the chaos branch each took. |
 | 7 | `X-Request-Id` echoed on every webhook delivery | Not in §06's header list, but §09 Tier 2 requires a correlation id that survives into the webhook path. |
 | 8 | `PAYGATE_WEBHOOK_URL` accepted as an alias for `PAYGATE_CALLBACK_URL` | `docker-compose.yml` uses the second name. Accepting both meant no shared file had to change; the brief's name wins if both are set. |
+| 9 | `POST /paygate/_ledger/import` — signed bulk load of charges that already happened | The seed produces twenty thousand settled bookings, each implying a captured charge. Replaying them through `POST /paygate/charges` would fail 10% on purpose and dispatch a webhook per acceptance that would try to confirm already-confirmed bookings. These are history to agree on, not events to replay. See below for why this one authenticates. |
 
 The `/paygate/_test/*` routes forge signed webhooks and take no authentication.
 They live in their own module (`src/test-routes.ts`) so the boundary between the
@@ -444,6 +445,79 @@ of `PAYGATE_TEST_ENDPOINTS`. That is not a security control — Paygate holds no
 real money — but a legibility one: nobody reading a production route table
 should have to work out whether an unauthenticated webhook forger is scaffolding
 or an oversight.
+
+`/paygate/_ledger/import` is the one extension that is *not* unauthenticated,
+and the difference decides where each can live. It verifies the same HMAC over
+the same raw bytes with the same shared secret Paygate signs its webhooks with,
+in the opposite direction — no new credential and no new mechanism — so it can
+register under `NODE_ENV=production`, which it has to: the deployed instance is
+exactly where the demo data that needs it lives. A caller who cannot sign cannot
+import.
+
+### Paygate's ledger is durable, and that reverses a P3 decision
+
+**P3 kept Paygate's entire state in memory and argued for it explicitly:** a
+test double is not a system of record, restarting it between runs *should* wipe
+it, and a database would invite a reviewer to think the API's payment integrity
+depends on the provider remembering things. That last point is true — and it is
+true about **INV-3**, which is not the invariant the choice broke.
+
+**INV-5 is.** "Money is never silently lost … provable via a reconciliation
+endpoint returning zero discrepancies" cannot be demonstrated against a provider
+with amnesia. Render's free tier sleeps after fifteen idle minutes, so a charge
+captured before lunch does not exist after it and the refund that follows
+answers `404 unknown_charge`: money gone from the provider's point of view,
+owed from ours, no trace. It also made §4's pull path (`CHARGE_POLL_AFTER_
+SECONDS`, below) inert — asking a provider for an outcome it structurally cannot
+remember always answers "never heard of it", and the API was reading that as an
+answer rather than as the absence of one.
+
+Found in P8 by cancelling a seeded booking in a browser, not by reasoning about
+it. The full reversal, including what it costs, is DECISIONS.md 13.
+
+**The boundary is real, and one instance is a cost constraint rather than
+coupling.** Paygate owns four tables — `paygate_charges`, `paygate_refunds`,
+`paygate_idempotency`, `paygate_deliveries` — created by its own migration
+runner against its own `paygate_migrations` history table. On every target this
+project runs on, those tables live in the same Postgres instance as the API's,
+because the free tier provides one instance and paying for two to make a point
+would be the wrong trade. Everything that would make that *coupling* is absent,
+deliberately and checkably:
+
+- **No import crosses the boundary.** `apps/paygate` does not import from
+  `apps/api/src/db`, and does not depend on Drizzle at all — which is why the
+  migration runner is forty hand-written lines rather than a dependency. The
+  separation is visible in the import graph, not only in this paragraph.
+- **No foreign key crosses it, in either direction.**
+  `paygate_charges.reference` holds the API's booking id as an **opaque
+  string**, exactly as a real provider's `metadata.reference` does. Paygate
+  never resolves it, never validates it, and answers identically if the API's
+  schema is dropped. (`SELECT` over `pg_constraint` for foreign keys where one
+  side is `paygate_*` and the other is not returns zero rows.)
+- **No shared migration history**, so the two can be applied in either order by
+  either service.
+- **A separate connection variable.** `PAYGATE_DATABASE_URL`, not the API's
+  `DATABASE_URL`. One shared variable would have made the separation invisible
+  and, in time, untrue; pointing this one at a different Postgres is the whole
+  of what splitting them takes.
+
+**In-memory is still available and is no longer the default.**
+`PAYGATE_STORE=memory` selects it and `/health` reports which store is live, so
+it is never a guess. It exists for the 39 unit tests that assert the idempotency
+contract and the chaos rates — durability buys those nothing and a database
+would cost them the sub-second feedback that makes them worth running.
+`PAYGATE_STORE=postgres` with no URL is a **boot failure, not a fallback**: a
+silent fallback to memory is precisely how a deployment ends up running the
+broken store with nobody having chosen it.
+
+**Two races became safe on purpose rather than by accident.** `openCharge`
+claims its Idempotency-Key with `INSERT … ON CONFLICT DO NOTHING RETURNING`, so
+concurrent requests carrying one key produce one charge and one replay; in
+memory that held only because Node does not interleave between a read and a
+write. `openRefund` takes `FOR UPDATE` on the charge before checking
+`refunded_minor + amount <= amount_minor` — a read-modify-write that two
+concurrent partial refunds could each pass independently — with a CHECK
+constraint as the backstop.
 
 ### Two implementation choices worth naming
 
@@ -829,7 +903,7 @@ cover it.
 ### 3. The reconciliation endpoint — INV-5's only evidence
 
 **`GET /admin/reconciliation`.** The endpoint whose entire purpose is to prove
-that no money was lost. It runs a union of seven discrepancy subqueries across
+that no money was lost. It runs a union of nine discrepancy subqueries across
 `payments`, `payment_events`, `webhook_deliveries` and `bookings` — and runs it
 **twice**, once to count every discrepancy by kind and once to return a page of
 them. The second pass was added deliberately in P4, because the one-pass version

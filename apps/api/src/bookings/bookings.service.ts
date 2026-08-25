@@ -11,6 +11,7 @@ import {
   bookingLineItems,
   bookings,
   equipmentTypes,
+  payments,
   rooms,
   venues,
   type Booking,
@@ -555,6 +556,20 @@ export class BookingsService {
         venue_id: bookings.venueId,
         room_id: bookings.roomId,
         room_name: rooms.name,
+        venue_name: venues.name,
+        /**
+         * The venue's own timezone, carried on every row.
+         *
+         * Added in P8 so the console can render one time convention. It showed
+         * venue-local time on the room page and UTC at checkout for the same
+         * slot, because availability returns a timezone and nothing else did —
+         * so the two screens disagreed about what hour a booking was at, which
+         * is the single most alarming thing a booking system can do.
+         *
+         * The join is already here for `room_name`; `venues` costs one more
+         * hop on an indexed foreign key.
+         */
+        timezone: venues.timezone,
         user_id: bookings.userId,
         starts_at: bookings.startsAt,
         ends_at: bookings.endsAt,
@@ -567,6 +582,7 @@ export class BookingsService {
       })
       .from(bookings)
       .innerJoin(rooms, eq(rooms.id, bookings.roomId))
+      .innerJoin(venues, eq(venues.id, bookings.venueId))
       .where(where)
       .orderBy(desc(bookings.startsAt))
       .limit(query.page_size)
@@ -599,6 +615,19 @@ export class BookingsService {
     // be used to confirm that a row exists. ARCHITECTURE.md Assumption 6.
     if (!booking) throw new NotFoundException();
 
+    // The room and venue the booking is for, so one screen can name them and
+    // render the slot in the venue's own timezone rather than in UTC.
+    const [context] = await this.db
+      .select({
+        room_name: rooms.name,
+        venue_name: venues.name,
+        timezone: venues.timezone,
+      })
+      .from(rooms)
+      .innerJoin(venues, eq(venues.id, rooms.venueId))
+      .where(eq(rooms.id, booking.roomId))
+      .limit(1);
+
     const items = await this.db
       .select({
         equipment_type_id: bookingLineItems.equipmentTypeId,
@@ -609,6 +638,51 @@ export class BookingsService {
       .from(bookingLineItems)
       .innerJoin(equipmentTypes, eq(equipmentTypes.id, bookingLineItems.equipmentTypeId))
       .where(eq(bookingLineItems.bookingId, bookingId));
+
+    /**
+     * The settled payment record, added in P8.
+     *
+     * ## Why the console needed this and what it was showing instead
+     *
+     * The checkout screen printed the payment as the provider described it at
+     * the moment the charge was ACCEPTED — the 202 — and never asked again. So
+     * a booking that reached CONFIRMED sat next to a payment panel reading
+     * PENDING with a charge id beside it, which reads as a contradiction and
+     * was reported as one.
+     *
+     * It was not a contradiction, and it was not INV-5 either: `payments.status`
+     * is genuinely advanced to SUCCEEDED by `onChargeSucceeded`, in the same
+     * transaction that confirms the booking, and the reconciliation report has
+     * always read that column rather than the 202. The stale value was in the
+     * browser, not in the database. What the console lacked was any endpoint
+     * that would tell it the settled truth: `POST /bookings/:id/pay` answers
+     * once, and `GET /bookings/:id` did not carry a payment at all.
+     *
+     * So the record is published here, on the read the console already polls,
+     * under exactly the tenant scope the booking itself was found by. It is not
+     * a second source of truth — it is the same row the reconciler reads.
+     *
+     * `LIMIT 1` is honest rather than lazy: `payments.idempotency_key` is
+     * `charge:<booking_id>` and UNIQUE, so a booking has at most one charge by
+     * construction. That is INV-3's mechanism, not a convention. A second row
+     * would be the `double_capture` discrepancy, and the place that is meant to
+     * be noticed is `GET /admin/reconciliation`, not silently here.
+     */
+    const [payment] = await this.db
+      .select({
+        payment_id: payments.id,
+        charge_id: payments.chargeId,
+        status: payments.status,
+        amount_minor: payments.amountMinor,
+        refunded_minor: payments.refundedMinor,
+        refund_id: payments.refundId,
+        failure_reason: payments.failureReason,
+        updated_at: payments.updatedAt,
+      })
+      .from(payments)
+      .where(eq(payments.bookingId, bookingId))
+      .orderBy(desc(payments.createdAt))
+      .limit(1);
 
     // Every field is listed rather than spread.
     //
@@ -621,7 +695,10 @@ export class BookingsService {
     return {
       id: booking.id,
       venue_id: booking.venueId,
+      venue_name: context?.venue_name ?? null,
       room_id: booking.roomId,
+      room_name: context?.room_name ?? null,
+      timezone: context?.timezone ?? 'UTC',
       user_id: booking.userId,
       status: booking.status,
       starts_at: booking.startsAt.toISOString(),
@@ -634,6 +711,14 @@ export class BookingsService {
       created_at: booking.createdAt.toISOString(),
       updated_at: booking.updatedAt.toISOString(),
       line_items: items.map((i) => ({ ...i, rate_minor: i.rate_minor.toString() })),
+      payment: payment
+        ? {
+            ...payment,
+            amount_minor: payment.amount_minor.toString(),
+            refunded_minor: payment.refunded_minor.toString(),
+            updated_at: payment.updated_at.toISOString(),
+          }
+        : null,
     };
   }
 

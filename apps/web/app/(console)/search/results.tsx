@@ -14,10 +14,11 @@ import { Table, TableScroll, TBody, TD, TH, THead, TR } from '@/components/ui/ta
  * two lays out exactly like page one — a table that reflows when the longest
  * room name changes is the thing that makes a list feel unreliable.
  *
- * The row links carry the room's catalogue fields — name, venue, city, rate —
- * as query parameters. There is no `GET /rooms/:id` on this API and `/search`
- * cannot filter by id, so the detail screen has no other way to name the room a
- * reader just clicked. See `app/(console)/rooms/[id]/page.tsx`.
+ * Row links are bare `/rooms/:id`. They used to carry the room's name, venue,
+ * city and rate as query parameters, because there was no `GET /rooms/:id` and
+ * `/search` cannot filter by id — so a detail screen reached any other way had
+ * nothing to name the room with. P8 added the endpoint, so the link is a link
+ * again and a pasted URL renders exactly as a clicked one does.
  *
  * Rates are printed without a currency symbol on purpose. `bookings.currency`
  * exists and is authoritative; `rooms.hourly_rate_minor` has no currency
@@ -216,16 +217,9 @@ function SearchFailure({ error }: { error: unknown }) {
   throw error;
 }
 
-/** The detail link, carrying what only the catalogue knows. */
+/** The detail link. The room screen loads the room itself. */
 function roomHref(room: SearchResult['data'][number]): string {
-  const params = new URLSearchParams({
-    name: room.name,
-    venue: room.venue_name,
-    venue_id: room.venue_id,
-    city: room.city,
-    rate: room.hourly_rate_minor,
-  });
-  return `/rooms/${room.id}?${params.toString()}`;
+  return `/rooms/${room.id}`;
 }
 
 function pageHref(

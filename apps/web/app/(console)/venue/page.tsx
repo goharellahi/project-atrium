@@ -5,7 +5,7 @@ import { PageHeader } from '@/components/app-shell';
 import { ColdStartNotice } from '@/components/cold-start';
 import { Panel } from '@/components/ui/panel';
 import { TableSkeleton } from '@/components/ui/skeleton';
-import { isStaff, requireUser } from '@/lib/session';
+import { hasVenueScope, requireUser } from '@/lib/session';
 import { VENUE_BOOKING_COLUMNS } from '../bookings/booking-table';
 import { BookingsList } from '../bookings/list';
 import { StatusFilter } from '../bookings/status-filter';
@@ -34,7 +34,14 @@ export default async function VenuePage({
   searchParams: Promise<{ status?: string; page?: string }>;
 }) {
   const user = await requireUser('/venue');
-  if (!isStaff(user.role)) redirect('/bookings');
+  // Venue staff and venue admins only. A PLATFORM_ADMIN has no venue on their
+  // token, so this screen has no subject for them — `GET /bookings` would
+  // return every booking on the platform under a heading that says "venue".
+  // They get the reconciliation report instead, which is the platform-wide
+  // view that is actually theirs.
+  if (!hasVenueScope(user.role)) {
+    redirect(user.role === 'PLATFORM_ADMIN' ? '/reconciliation' : '/bookings');
+  }
 
   const { status, page } = await searchParams;
   const pageNumber = Number(page) > 0 ? Number(page) : 1;

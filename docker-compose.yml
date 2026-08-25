@@ -154,6 +154,11 @@ services:
       dockerfile: apps/paygate/Dockerfile
     container_name: atrium-paygate
     restart: unless-stopped
+    # Paygate keeps a durable ledger now, so it needs the database up before it
+    # binds. It runs its own migrations on boot under an advisory lock.
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       NODE_ENV: ${NODE_ENV:-development}
       PAYGATE_PORT: 9000
@@ -170,6 +175,19 @@ services:
       # Without a seed the stack runs on Paygate's default and every chaos
       # branch is unreproducible, which makes a failed run undebuggable.
       PAYGATE_SEED: ${PAYGATE_SEED:-atrium-local}
+      # Paygate's own connection string, and its own tables.
+      #
+      # The same instance the API uses, because the deployment target gives one
+      # instance. That is a hosting cost, not coupling: every name Paygate
+      # creates is prefixed `paygate_`, its migrations are its own, and nothing
+      # joins or references across the boundary in either direction. Pointing
+      # this at a different Postgres is the whole of what separating them takes.
+      #
+      # It is separate from the API's DATABASE_URL precisely so that stays true
+      # — one shared variable would have made the separation invisible and, in
+      # time, untrue.
+      PAYGATE_DATABASE_URL: postgres://${POSTGRES_USER:-atrium}:${POSTGRES_PASSWORD:-atrium}@postgres:5432/${POSTGRES_DB:-atrium}
+      PAYGATE_STORE: ${PAYGATE_STORE:-postgres}
       LOG_LEVEL: ${LOG_LEVEL:-debug}
     ports:
       - "${PAYGATE_PORT:-9000}:9000"
@@ -192,7 +210,19 @@ services:
       NODE_ENV: ${NODE_ENV:-development}
       PORT: 3000
       HOSTNAME: 0.0.0.0
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8080}
+      # `API_URL`, and `nginx` rather than `localhost`. Both halves were wrong
+      # and either one alone breaks the console completely.
+      #
+      # The name: this said NEXT_PUBLIC_API_BASE_URL, which nothing reads.
+      # `apps/web/lib/api.ts` consults API_URL then NEXT_PUBLIC_API_URL, so the
+      # console came up with no API configured at all.
+      #
+      # The host: every call the console makes is server-side, by design — the
+      # API sets no CORS headers, so a browser on the console's origin cannot
+      # reach it. `localhost:8080` inside this container is this container, not
+      # the load balancer. It has to be a name resolvable on the compose
+      # network, which is why it is the same `nginx:8080` Paygate calls back on.
+      API_URL: ${API_URL:-http://nginx:8080}
     ports:
       - "${WEB_PORT:-3000}:3000"
     depends_on:

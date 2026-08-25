@@ -196,9 +196,23 @@ nginx/nginx.conf   round-robin LB over the three replicas
 *Kept blunt and current. A known, documented bug costs almost nothing; an
 undocumented one found in review costs a great deal.*
 
-**Current phase: P7 complete — the operations console.** Six screens on
-`apps/web`: sign-in with the seeded role logins on the page, cross-venue search,
-room availability and hold, checkout with a live hold countdown and the chaotic
+**Current phase: P8 phase A complete — the Tier 1 correctness gaps, in two
+passes.** The second pass found that the payment provider had no memory across
+a restart, which made INV-5 undemonstrable rather than merely inconvenient; it
+has a durable ledger now, and `tests/e2e/src/provider-restart.e2e.test.ts` pays
+a booking, restarts the container and refunds it.
+ The
+overbooking buffer a venue admin may set is now settable, and proven end to end
+through the endpoints rather than around them; equipment line items are
+reachable by the only role that books; a room can be read by its own id; and
+every seeded settled booking carries the cancellation policy that was live when
+it confirmed, so the policy-as-data guarantee is visible on demo data instead of
+merely true in code. The Tier 3 cut is withdrawn — the deadline was extended and
+the whole brief is in scope.
+
+P7 before it delivered the operations console: six screens on `apps/web` —
+sign-in with the seeded role logins on the page, cross-venue search, room
+availability and hold, checkout with a live hold countdown and the chaotic
 payment path, my bookings with cancellation, and a read-only venue view.
 
 Building it found **an API defect that had been there since the endpoint was
@@ -234,18 +248,20 @@ local compose stack.
 
 Everything below is scheduled, not abandoned. See [PLAN.md](PLAN.md).
 
-- **Venue administration.** Nothing writes `venues.overbooking_buffer_pct`, so
-  the room-side 422 for a non-zero buffer still has no way to be triggered. It
-  was outside P7's six screens; P8.
+- **The venue administration SCREENS.** The API half landed in P8 —
+  `PATCH /venues/settings` writes the overbooking buffer, `POST`/`PATCH
+  /venues/rooms` and `/venues/equipment-types` manage inventory, all
+  VENUE_ADMIN-only and venue-scoped from the token, all probed by the INV-6
+  suite. There is no console for them yet; that is Tier 2.
 - **Revenue and utilisation page.** The API half landed in P6 and answers; there
-  is no screen rendering it. Outside P7's six screens; P8.
-- **Four API shapes the console had to work around.** There is no
-  `GET /rooms/:id` and `/search` cannot filter by id, so the room link carries
-  the room's name and rate; there is no customer-readable equipment catalogue,
-  so a customer can book equipment they cannot list; there is no refund preview,
-  so `apps/web/lib/refund.ts` re-implements the arithmetic and labels it a quote;
-  and the API sets no CORS headers, which is why every call the console makes is
-  server-side. All four are described in the P7 entry of [PLAN.md](PLAN.md).
+  is no screen rendering it. Outside P7's six screens.
+- **Two of the four API shapes the console worked around are still open.** There
+  is no refund preview, so `apps/web/lib/refund.ts` re-implements the arithmetic
+  and labels it a quote; and the API sets no CORS headers, which is why every
+  call the console makes is server-side. The other two closed in P8:
+  `GET /rooms/:id` exists, and `GET /rooms/:id/equipment-types` is the
+  customer-readable catalogue, so the room screen no longer carries the room on
+  its querystring and no longer asks a customer to paste a UUID.
 - **Create-hold's p95 is missed, and the miss is deliberate.** 536 ms against a
   250 ms target. The endpoint answers in 47 ms p95 in isolation, so it is starved
   rather than slow: three Node replicas pinned at one core each on a four-core
@@ -286,15 +302,45 @@ features — the more expensive kind to leave undocumented.
 - **Availability is advisory, deliberately.** `GET /rooms/:id/availability` can
   offer a slot that a hold then rejects, because someone took it in between.
   This is not a defect to be engineered away — it is why the hold path does not
-  consult it.
+  consult it. It does *not* offer a slot that could never have worked: until P8
+  it enumerated from the venue's opening time regardless of the hour, so a range
+  starting today listed slots that had already happened and clicking the first
+  one answered "must start at least 60 minutes ahead". Advising the impossible
+  is a different and worse thing than losing a race.
+- **Paygate keeps a durable ledger, and it did not until P8.** It held every
+  charge in memory, which meant Render's free tier — asleep after fifteen idle
+  minutes — forgot everything it had captured, and the next refund answered
+  `404 unknown_charge`. That is not a demo-data quirk: INV-5 cannot be
+  demonstrated against a provider that cannot remember what it captured, and the
+  API's poll-the-provider recovery path could only ever be told "never heard of
+  it". Paygate now has its own `paygate_*` tables, its own migrations, no import
+  and no foreign key across the boundary, and the seed registers its charges
+  with them — so seeded and live bookings both refund for real. The reversal,
+  including what it costs, is [DECISIONS.md](DECISIONS.md) 13.
+- **Paygate shares the API's Postgres instance, and that is a cost constraint
+  rather than coupling.** The free tier gives one instance. Everything that
+  would make it coupling is absent and checkable: no import from
+  `apps/api/src/db`, no Drizzle dependency at all, no foreign key crossing in
+  either direction, a separate `PAYGATE_DATABASE_URL`, and
+  `paygate_charges.reference` holding the booking id as an opaque string exactly
+  as a real provider's `metadata.reference` does. Pointing that variable at a
+  different database is the whole of what separating them takes.
+- **Re-seeding leaves orphaned rows in Paygate's ledger.** The seed truncates
+  the API's tables and mints new booking ids, so the previous run's charges stay
+  at the provider with nothing pointing at them. Left alone deliberately: a real
+  provider does not forget because a merchant reset their own database, and a
+  destructive "clear the provider" endpoint would be a worse thing to own.
 - **The 15-minute turnaround applies to rooms only.** Equipment uses raw
   `starts_at`/`ends_at`, not the buffered `slot` column. A tripod handed back at
   14:00 is available at 14:00. ARCHITECTURE.md, Assumption 7.
-- **`GET /search` and `GET /rooms/:id/availability` are cross-venue by design.**
-  They return catalogue data — name, capacity, amenities, price, free/busy —
-  and no bookings, customers or occupancy. The INV-6 suite probes both for the
-  absence of booking ids, user ids and emails rather than for a denial.
-  ARCHITECTURE.md, Assumption 8.
+- **Four routes are cross-venue by design.** `GET /search`,
+  `GET /rooms/:id`, `GET /rooms/:id/availability` and
+  `GET /rooms/:id/equipment-types` return catalogue data — name, capacity,
+  amenities, price, hourly rate, units owned, free/busy — and no bookings,
+  customers, revenue or live utilisation. They are listed in the census as
+  `CROSS_VENUE_BY_DESIGN` with a written reason each, and the census requires
+  every one of them to *also* be probed: the assertion is not a denial, it is
+  that the response body carries only inventory. ARCHITECTURE.md, Assumption 8.
 - **A payment cannot be re-attempted after a decline.** The charge idempotency
   key is derived from the booking id, so `FAILED` is terminal and the customer
   books again. That matches the brief's own state machine, which gives `FAILED`
