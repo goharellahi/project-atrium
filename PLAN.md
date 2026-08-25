@@ -1256,3 +1256,88 @@ PLATFORM_ADMIN 25,008 bookings (all venues)
 set on the Render service and a redeploy, which is a dashboard action. The
 mechanism is built and proved; the deployed run is the step after it. That is
 the one part of this phase that is finished in code and unfinished in fact.
+
+---
+
+### 2026-08-25 — P7 verified on the deployed instance
+
+`SEED_ON_BOOT=demo` was set and the service redeployed. The seed ran against the
+empty database exactly as it was proved to: all five accounts now authenticate,
+with the roles and venue scopes the brief requires.
+
+```
+admin@atrium.test     PLATFORM_ADMIN  no venue
+admin.a@atrium.test   VENUE_ADMIN     venue 9049da15
+staff.a@atrium.test   VENUE_STAFF     venue 9049da15   (same venue as admin.a)
+admin.b@atrium.test   VENUE_ADMIN     venue 06dc82db   (a DIFFERENT venue)
+customer@atrium.test  CUSTOMER        no venue
+```
+
+`admin@atrium.test` came back as PLATFORM_ADMIN, which confirms the truncate
+cleared the squatting CUSTOMER row that a register click had left on that email.
+
+**The whole booking path now works on the deployed pair, which it never had.**
+The README has said since P5 that the Paygate round trip had never actually run
+against the deployed services. It has now:
+
+```
+search  city + min_capacity + amenity   -> 7 rooms, all three filters applied
+hold    Tracking Room H, 2h             -> HELD, 28000 PKR
+pay                                     -> charge accepted
+webhook                                 -> CONFIRMED, policy snapshot frozen
+cancel  45.7h before start              -> tier 24h/50%, refunded 14000 of 28000
+```
+
+INV-5 on real deployed data, over 706,405,500 minor captured and 22,047,400
+refunded across 7,261 confirmed bookings and 20,889 settled payments:
+**`discrepancy_count: 0`**.
+
+Tenant isolation, through the console rather than against the API:
+
+```
+VENUE_STAFF  A   3,480 bookings   venue 9049da15
+VENUE_ADMIN  A   3,480 bookings   venue 9049da15
+VENUE_ADMIN  B   3,535 bookings   venue 06dc82db
+PLATFORM_ADMIN  25,001 bookings   all venues
+admin.b opening one of admin.a's bookings by direct id -> the 404 page, no data
+```
+
+---
+
+**One defect found, and it was in copy rather than in mechanism.**
+
+The first five payment attempts came back 502 in a row. Chaos is roughly one in
+ten, so five consecutive is about one in a hundred thousand — that was not the
+chaotic branch. The body said so:
+
+```
+provider_status: 429
+provider_body:   "Too Many Requests\n"
+```
+
+Plain text, not Paygate's JSON, and Paygate's own `/health` reported
+`charges: 0` — nothing had ever reached it. The platform edge was rate-limiting
+the API's outbound hop under the burst of retries. It is transient: after 75
+seconds one attempt succeeded and Paygate's counter moved to 1. Paygate has no
+rate limiter of its own, and a direct POST to its charge endpoint from outside
+answers a normal 422, so the throttle is on the API-to-Paygate leg only.
+
+The mechanism was right and the console's words were wrong. A 502 wraps whatever
+the provider said, and the checkout screen treated every 502 as the chaos branch
+— "roughly one charge in ten, press again". For a 429 that advice is exactly
+inverted: pressing again is what keeps the limit closed. A `rate_limited`
+outcome now reads the wrapped `provider_status`, says nothing was charged
+because the request never arrived, and asks for one retry after a minute.
+
+That is the kind of defect only a deployed run produces. The local stack has no
+edge in front of it, so no amount of local testing would have found it.
+
+---
+
+**Not verifiable from this environment:** the browser click-through against the
+deployed URL. Chromium in this container has no outbound network path — it
+reaches localhost and nothing else, with or without the proxy — so the deployed
+screens were verified by rendering them server-side with each role's session and
+asserting on the real markup, and the client-side behaviour (the ticking
+countdown, the select popups, active-nav on client navigation) was verified in a
+real browser against the same build locally.
