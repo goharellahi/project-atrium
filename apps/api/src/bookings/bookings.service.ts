@@ -556,6 +556,20 @@ export class BookingsService {
         venue_id: bookings.venueId,
         room_id: bookings.roomId,
         room_name: rooms.name,
+        venue_name: venues.name,
+        /**
+         * The venue's own timezone, carried on every row.
+         *
+         * Added in P8 so the console can render one time convention. It showed
+         * venue-local time on the room page and UTC at checkout for the same
+         * slot, because availability returns a timezone and nothing else did —
+         * so the two screens disagreed about what hour a booking was at, which
+         * is the single most alarming thing a booking system can do.
+         *
+         * The join is already here for `room_name`; `venues` costs one more
+         * hop on an indexed foreign key.
+         */
+        timezone: venues.timezone,
         user_id: bookings.userId,
         starts_at: bookings.startsAt,
         ends_at: bookings.endsAt,
@@ -568,6 +582,7 @@ export class BookingsService {
       })
       .from(bookings)
       .innerJoin(rooms, eq(rooms.id, bookings.roomId))
+      .innerJoin(venues, eq(venues.id, bookings.venueId))
       .where(where)
       .orderBy(desc(bookings.startsAt))
       .limit(query.page_size)
@@ -599,6 +614,19 @@ export class BookingsService {
     // 404 rather than 403 for another venue's booking, so a valid UUID cannot
     // be used to confirm that a row exists. ARCHITECTURE.md Assumption 6.
     if (!booking) throw new NotFoundException();
+
+    // The room and venue the booking is for, so one screen can name them and
+    // render the slot in the venue's own timezone rather than in UTC.
+    const [context] = await this.db
+      .select({
+        room_name: rooms.name,
+        venue_name: venues.name,
+        timezone: venues.timezone,
+      })
+      .from(rooms)
+      .innerJoin(venues, eq(venues.id, rooms.venueId))
+      .where(eq(rooms.id, booking.roomId))
+      .limit(1);
 
     const items = await this.db
       .select({
@@ -667,7 +695,10 @@ export class BookingsService {
     return {
       id: booking.id,
       venue_id: booking.venueId,
+      venue_name: context?.venue_name ?? null,
       room_id: booking.roomId,
+      room_name: context?.room_name ?? null,
+      timezone: context?.timezone ?? 'UTC',
       user_id: booking.userId,
       status: booking.status,
       starts_at: booking.startsAt.toISOString(),
