@@ -48,14 +48,55 @@ async function bootstrap(): Promise<void> {
   //
   // '::' accepts IPv4-mapped connections too, so the IPv4 healthcheck on
   // 127.0.0.1 still works.
-  await app.listen(env.API_PORT, '::');
+  //
+  // ## The fallback, and why it is not a retreat from the above
+  //
+  // A host with no IPv6 stack at all — a hardened container runtime, a CI
+  // sandbox, a kernel built without it — cannot bind '::' and answers
+  // EAFNOSUPPORT. Before P8 that was fatal: every replica crash-looped with
+  // "address family not supported", nginx reported all three unhealthy, and
+  // `docker compose up` simply never came up. Refusing to serve at all is a
+  // strictly worse outcome than serving on IPv4, and the diagnosis costs
+  // whoever hits it an hour.
+  //
+  // So it falls back, once, and says so at WARN. The default is unchanged and
+  // dual-stack is still what any host that can do it gets — including every
+  // deployment target this project has. What the fallback buys is that the
+  // stack stands up on a host that cannot, instead of looking broken.
+  const boundHost = await listenPreferringDualStack(app, env.API_PORT);
 
   logger.info(
-    { port: env.API_PORT, replica: env.REPLICA_ID, nodeEnv: env.NODE_ENV },
+    { port: env.API_PORT, host: boundHost, replica: env.REPLICA_ID, nodeEnv: env.NODE_ENV },
     'atrium-api listening',
   );
 
   await warnIfNoDefaultPolicy(app);
+}
+
+/**
+ * Bind '::', or '0.0.0.0' if this kernel has no IPv6.
+ *
+ * Only EAFNOSUPPORT is caught. EADDRINUSE, EACCES and everything else stay
+ * fatal — a port already taken is a real problem and retrying on a different
+ * address family would hide it.
+ */
+async function listenPreferringDualStack(
+  app: Awaited<ReturnType<typeof NestFactory.create>>,
+  port: number,
+): Promise<string> {
+  try {
+    await app.listen(port, '::');
+    return '::';
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'EAFNOSUPPORT') throw err;
+
+    logger.warn(
+      { port },
+      'no IPv6 on this host — binding 0.0.0.0. Behind Docker DNS this can produce 502s if a proxy resolves an AAAA record for this service.',
+    );
+    await app.listen(port, '0.0.0.0');
+    return '0.0.0.0';
+  }
 }
 
 /**
